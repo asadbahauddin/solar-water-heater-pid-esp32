@@ -31,9 +31,12 @@ DEFAULT_URL = "ws://192.168.4.1/ws"
 SENSOR_ERROR = -127
 
 # Urutan kolom CSV: timestamp wall-clock laptop dulu, lalu field dari ESP32.
+# Kolom baru (firmware v4, PID siang di pompa) ditaruh di belakang supaya
+# urutan kolom lama tidak berubah.
 ESP_FIELDS = [
     "t", "tangki", "kolektor", "lux", "night", "pump", "heaterDuty",
     "mode", "dnOverride", "emergency", "sp", "kp", "ki", "kd",
+    "pumpDuty", "dtOk", "pkp", "pki", "pkd", "dtOn", "dtOff", "pmin", "luxM", "luxS",
 ]
 CSV_FIELDS = ["wall_time"] + ESP_FIELDS
 
@@ -48,6 +51,12 @@ class CsvSink:
     def __init__(self, path):
         self.path = path
         is_new = not os.path.exists(path) or os.path.getsize(path) == 0
+        if not is_new:
+            with open(path, newline="", encoding="utf-8") as f:
+                header = next(csv.reader(f), [])
+            if header != CSV_FIELDS:
+                sys.exit(f"[ERROR] Kolom di {path} beda dengan format logger sekarang "
+                         f"(file dari versi lama). Pakai nama file lain, misal: -o data_baru.csv")
         self.f = open(path, "a", newline="", encoding="utf-8")
         if is_new:
             self._write_line(CSV_FIELDS)
@@ -90,22 +99,20 @@ def fmt_temp(v):
 
 
 def status_line(wall, d, n):
-    flags = []
-    if d.get("pump"):
-        flags.append("PUMP")
-    if d.get("night"):
-        flags.append("NIGHT")
+    def pct(v):
+        return f"{float(v):3.0f}%" if isinstance(v, (int, float)) else "n/a"
+
+    flags = ["MALAM" if d.get("night") else "SIANG"]
     if d.get("emergency"):
         flags.append("!!EMERGENCY!!")
-    duty = d.get("heaterDuty")
-    duty_s = f"{float(duty):5.1f}%" if isinstance(duty, (int, float)) else "  n/a"
+    pump = d.get("pumpDuty", 100 if d.get("pump") else 0)  # firmware lama cuma kirim bool
     return (
         f"{wall.strftime('%H:%M:%S')} #{n:<6} "
         f"Tangki {fmt_temp(d.get('tangki'))} | "
         f"Kolektor {fmt_temp(d.get('kolektor'))} | "
         f"SP {d.get('sp', '?')} | "
-        f"{str(d.get('mode', '?')):<9} | Duty {duty_s} "
-        f"{' '.join(flags)}"
+        f"{str(d.get('mode', '?')):<9} | Heater {pct(d.get('heaterDuty'))} "
+        f"Pompa {pct(pump)} | {' '.join(flags)}"
     )
 
 

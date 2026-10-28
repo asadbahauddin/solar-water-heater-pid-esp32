@@ -5,6 +5,31 @@ Solar Water Heater PID - Agung (Priyagung Dharma Hutomo)
 ESP32 DevKit - Netlist v3.1 + revisi heater DC 12V/120W -> MOSFET IRLZ44N
 ================================================================================
 
+REVISI v4 -- SISTEM AIR LOOPING (SIRKULASI PAKSA), PID SIANG DI POMPA:
+  - SIANG : panas dari kolektor, dibawa ke tangki oleh POMPA. PID siang
+            mengatur KECEPATAN POMPA (PWM 20 kHz di GPIO26, IRLB8721) dengan
+            PV = suhu tangki. Pompa cuma diizinkan jalan kalau kolektor
+            cukup lebih panas dari tangki (gerbang dT dengan histeresis,
+            default ON >= 5C, OFF < 2C) -- kalau kolektor lebih dingin,
+            memompa justru MENDINGINKAN tangki. Heater mati.
+  - MALAM : murni HEATER (PID malam, seperti sebelumnya), pompa mati.
+            MENDUNG diperlakukan sama dengan malam, asal lux-nya turun di
+            bawah ambang malam.
+  - Siang/malam pakai DUA ambang lux (histeresis): lux < luxMalam -> MALAM,
+    lux > luxSiang -> SIANG, di antaranya status tidak berubah. Kedua
+    ambang bisa diubah & disimpan dari dashboard (kalibrasi dari data).
+  - Gain PID siang (pompa) dan malam (heater) TERPISAH, setpoint sama.
+  - Tombol pompa manual cuma berlaku di mode MANUAL.
+  - STEP_TEST ikut status siang/malam: MALAM -> heater 100%, SIANG ->
+    pompa 100% (TANPA gerbang dT -- mulai step test pompa saat kolektor
+    sudah panas).
+  - FIX: DS18B20 yang terputus mengembalikan -127 (bukan NAN), dulu lolos
+    dari semua pengecekan isnan() -> PID bisa 100% & safety cutoff buta.
+    Sekarang -127 dikonversi ke NAN saat dibaca; heater & pompa dipaksa
+    mati kalau sensor tangki error.
+  - Safety cutoff sekarang mematikan heater DAN pompa (pompa sekarang
+    sumber panas di siang hari).
+
 INI MENCAKUP TAHAP 2-4 DARI JADWAL (JADWAL_IMPLEMENTASI_PID_v1.md):
   TAHAP 2 (step test open-loop)   -> mode STEP_TEST di bawah
   TAHAP 3 (hitung Kp/Ki/Kd)       -> BUKAN bagian kode ini. Itu analisis dari
@@ -105,7 +130,7 @@ CARA PAKAI:
                                     // konfirmasi sama seperti test isolasi sebelumnya. Kalau
                                     // suhu tangki balik gak stabil/disconnect, ini kandidat
                                     // pertama yang perlu dicurigai lagi.
-#define PIN_PUMP_MOSFET         26  // IRLB8721, on/off saja
+#define PIN_PUMP_MOSFET         26  // IRLB8721, PWM kecepatan pompa (PID siang)
 #define PIN_HEATER_MOSFET       27  // IRLZ44N, PWM asli (analogWrite)
 // PIN_BH1750_SDA1/SCL1 (25/32) SUDAH TIDAK DIPAKAI -- di PCB fisik BH1750
 // disolder LANGSUNG ke bus I2C default (GPIO21/22), bukan ke Wire1. GPIO25/32
@@ -123,7 +148,11 @@ CARA PAKAI:
 #define LCD_I2C_ADDR             0x27   // ASUMSI, cek pakai I2C scanner kalau blank
 #define LCD_COLS                 20
 #define LCD_ROWS                 4
-#define BH1750_LUX_MALAM_AMBANG  10.0
+// Ambang siang/malam (histeresis) -- DEFAULT saja, kalibrasi dari data lapangan
+// lalu ubah lewat dashboard (tersimpan di flash). Mendung harus jatuh di bawah
+// LUX_MALAM supaya dianggap malam (heater yang kerja).
+#define LUX_MALAM_DEFAULT        10.0     // lux < ini  -> MALAM
+#define LUX_SIANG_DEFAULT        50.0     // lux > ini  -> SIANG
 
 #define WIFI_AP_SSID             "SWH_PID_Agung"
 #define WIFI_AP_PASSWORD         "agung12345"
@@ -139,6 +168,16 @@ CARA PAKAI:
 #define HEATER_PWM_RES_BITS      8        // 0-255
 #define HEATER_PWM_CHANNEL       0        // channel LEDC (API core 2.x, channel-based)
 
+#define PUMP_PWM_FREQ_HZ         20000    // 20 kHz: di atas pendengaran, pompa brushed gak berdengung
+#define PUMP_PWM_RES_BITS        8        // 0-255
+#define PUMP_PWM_CHANNEL         2        // BUKAN 1: channel 0&1 berbagi timer LEDC yang sama,
+                                          // frekuensi pompa akan ikut mengubah PWM heater
+
+// Default parameter pompa (bisa diubah & disimpan dari dashboard)
+#define DT_ON_DEFAULT            5.0      // pompa diizinkan kalau T_kolektor - T_tangki >= ini
+#define DT_OFF_DEFAULT           2.0      // dan dilarang lagi kalau selisihnya < ini
+#define PUMP_MIN_DUTY_DEFAULT    30.0     // duty minimum saat pompa jalan (di bawah ini pompa bisa macet)
+
 // ---------------- MODE & STATE ----------------------------------------------
 enum ControlMode { MODE_MANUAL = 0, MODE_STEP_TEST = 1, MODE_AUTO_PID = 2 };
 enum DayNightOverride { DN_AUTO = 0, DN_FORCE_DAY = 1, DN_FORCE_NIGHT = 2 };
@@ -146,10 +185,18 @@ enum DayNightOverride { DN_AUTO = 0, DN_FORCE_DAY = 1, DN_FORCE_NIGHT = 2 };
 ControlMode currentMode = MODE_MANUAL;       // SELALU start manual, lihat catatan #3
 DayNightOverride dayNightOverride = DN_AUTO; // reset ke AUTO tiap boot, TIDAK dipersist
 
-bool statusPump = false;
+bool statusPump = false;           // tombol pompa manual, cuma berlaku di MODE_MANUAL
 bool manualHeaterOn = false;       // buat bring-up test MOSFET di MODE_MANUAL
 bool heaterEmergencyOff = false;   // true kalau safety cutoff pernah kena, perlu clear manual
 float heaterDutyPercent = 0.0;     // 0-100, buat display & step test fixed-duty
+float pumpDutyPercent = 0.0;       // 0-100, keluaran aktual ke pompa
+bool dtOk = false;                 // gerbang dT kolektor-tangki (dengan histeresis)
+
+float luxMalam = LUX_MALAM_DEFAULT;
+float luxSiang = LUX_SIANG_DEFAULT;
+float dtOn = DT_ON_DEFAULT;
+float dtOff = DT_OFF_DEFAULT;
+float pumpMinDuty = PUMP_MIN_DUTY_DEFAULT;
 
 // ---------------- SENSOR OBJEK -----------------------------------------------
 OneWire oneWireKolektor(PIN_DS18B20_KOLEKTOR);
@@ -168,12 +215,16 @@ bool isNightEffective = false; // setelah dipengaruhi dayNightOverride
 // ---------------- PID STATE ---------------------------------------------------
 // Pola clamped-integral anti-windup + derivative-on-measurement, sama dengan
 // pendekatan Arduino PID Library (Brett Beauregard) yang sudah terbukti.
+// Dua kontroler terpisah (plant-nya beda: heater vs aliran dari kolektor),
+// setpoint sama. Gain = PLACEHOLDER konservatif -- GANTI setelah Tahap 3!
+struct PidCtrl {
+  float kp, ki, kd;
+  float outputSum;   // akumulasi integral, sudah dalam skala output 0-100
+  float lastInput;
+};
 float pidSetpoint = 50.0;
-float pidKp = 5.0;    // PLACEHOLDER konservatif -- GANTI setelah Tahap 3!
-float pidKi = 0.05;   // PLACEHOLDER konservatif -- GANTI setelah Tahap 3!
-float pidKd = 0.0;    // PLACEHOLDER -- mulai dari 0, baru ditambah kalau perlu
-float pidOutputSum = 0.0;   // akumulasi integral, sudah termasuk dalam skala output 0-100
-float pidLastInput = NAN;
+PidCtrl pidHeater = {5.0, 0.05, 0.0, 0.0, NAN};   // PID MALAM
+PidCtrl pidPump   = {10.0, 0.1, 0.0, 0.0, NAN};   // PID SIANG
 const float PID_OUT_MIN = 0.0;
 const float PID_OUT_MAX = 100.0;
 
@@ -204,7 +255,10 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 void handleCommand(String msg);
 void updateDayNight();
 void runControlLogic();
-float computePID(float input, float setpoint);
+float computePID(PidCtrl &pid, float input, float setpoint);
+void resetPID(PidCtrl &pid);
+void setHeater(float duty);
+void setPump(float duty);
 void sendTelemetry();
 void updateLCD();
 void logSerialCSV(unsigned long t);
@@ -245,7 +299,7 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   <div class="statline">Suhu Tangki (PV): <span class="big" id="st">--</span> C</div>
   <div class="statline">Suhu Kolektor: <span id="sk">--</span> C</div>
   <div class="statline">Cahaya: <span id="lux">--</span> lux (<span id="dn">--</span>)</div>
-  <div class="statline">Pompa: <span id="pumpstat">--</span> | Heater duty: <span id="heaterstat">--</span>% | Mode: <span id="modestat">--</span></div>
+  <div class="statline">Pompa: <span id="pumpstat">--</span>% (dT <span id="dtstat">--</span>) | Heater duty: <span id="heaterstat">--</span>% | Mode: <span id="modestat">--</span></div>
   <div class="statline" id="emergline" style="display:none;" class="bad">** SAFETY CUTOFF AKTIF - HEATER DIPAKSA OFF **</div>
 </div>
 
@@ -265,7 +319,7 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
     <button id="btnAutoPid" onclick="setMode('AUTO_PID')">Auto PID</button>
   </div>
   <div class="row">
-    <label>Pompa:</label>
+    <label>Pompa (manual, mode Manual saja):</label>
     <button onclick="cmd('PUMP:ON')">ON</button>
     <button class="off" onclick="cmd('PUMP:OFF')">OFF</button>
   </div>
@@ -287,9 +341,20 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 
 <div class="card">
   <div class="row"><label>Setpoint (C):</label><input type="number" id="inSp" step="0.5"></div>
+  <div class="row"><b>PID Malam (heater)</b></div>
   <div class="row"><label>Kp:</label><input type="number" id="inKp" step="0.01"></div>
   <div class="row"><label>Ki:</label><input type="number" id="inKi" step="0.001"></div>
   <div class="row"><label>Kd:</label><input type="number" id="inKd" step="0.01"></div>
+  <div class="row"><b>PID Siang (pompa)</b></div>
+  <div class="row"><label>Kp:</label><input type="number" id="inPkp" step="0.01"></div>
+  <div class="row"><label>Ki:</label><input type="number" id="inPki" step="0.001"></div>
+  <div class="row"><label>Kd:</label><input type="number" id="inPkd" step="0.01"></div>
+  <div class="row"><label>dT ON (C):</label><input type="number" id="inDtOn" step="0.5"></div>
+  <div class="row"><label>dT OFF (C):</label><input type="number" id="inDtOff" step="0.5"></div>
+  <div class="row"><label>Duty min (%):</label><input type="number" id="inPmin" step="1"></div>
+  <div class="row"><b>Ambang siang/malam</b></div>
+  <div class="row"><label>Malam jika lux &lt;</label><input type="number" id="inLuxM" step="1"></div>
+  <div class="row"><label>Siang jika lux &gt;</label><input type="number" id="inLuxS" step="1"></div>
   <div class="row"><button onclick="saveParams()">Simpan ke ESP32 (persist)</button></div>
 </div>
 
@@ -297,6 +362,13 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
 var ws = new WebSocket('ws://' + location.host + '/ws');
 var chartData = []; // {t, tangki, kolektor, sp}
 var startTime = null;
+// id input -> [field telemetry, perintah SET]
+var PARAMS = {
+  inSp:['sp','SET_SP'], inKp:['kp','SET_KP'], inKi:['ki','SET_KI'], inKd:['kd','SET_KD'],
+  inPkp:['pkp','SET_PKP'], inPki:['pki','SET_PKI'], inPkd:['pkd','SET_PKD'],
+  inDtOn:['dtOn','SET_DTON'], inDtOff:['dtOff','SET_DTOFF'], inPmin:['pmin','SET_PMIN'],
+  inLuxM:['luxM','SET_LUXM'], inLuxS:['luxS','SET_LUXS']
+};
 
 ws.onmessage = function(ev) {
   var d = JSON.parse(ev.data);
@@ -304,7 +376,8 @@ ws.onmessage = function(ev) {
   document.getElementById('sk').textContent = d.kolektor.toFixed(2);
   document.getElementById('lux').textContent = d.lux.toFixed(1);
   document.getElementById('dn').textContent = d.night ? 'MALAM' : 'SIANG';
-  document.getElementById('pumpstat').textContent = d.pump ? 'ON' : 'OFF';
+  document.getElementById('pumpstat').textContent = d.pumpDuty.toFixed(0);
+  document.getElementById('dtstat').textContent = d.dtOk ? 'OK' : 'kurang';
   document.getElementById('heaterstat').textContent = d.heaterDuty.toFixed(0);
   document.getElementById('modestat').textContent = d.mode;
   document.getElementById('emergline').style.display = d.emergency ? 'block' : 'none';
@@ -312,10 +385,10 @@ ws.onmessage = function(ev) {
   highlightMode(d.mode);
   highlightDn(d.dnOverride);
 
-  if (!document.getElementById('inSp').matches(':focus')) document.getElementById('inSp').value = d.sp;
-  if (!document.getElementById('inKp').matches(':focus')) document.getElementById('inKp').value = d.kp;
-  if (!document.getElementById('inKi').matches(':focus')) document.getElementById('inKi').value = d.ki;
-  if (!document.getElementById('inKd').matches(':focus')) document.getElementById('inKd').value = d.kd;
+  for (var id in PARAMS) {
+    var el = document.getElementById(id);
+    if (!el.matches(':focus')) el.value = d[PARAMS[id][0]];
+  }
 
   if (startTime === null) startTime = d.t;
   chartData.push({t: (d.t - startTime)/1000.0, tangki: d.tangki, kolektor: d.kolektor, sp: d.sp});
@@ -327,10 +400,7 @@ function cmd(s) { ws.send(s); }
 function setMode(m) { cmd('MODE:' + m); }
 function setDn(m) { cmd('DN:' + m); }
 function saveParams() {
-  cmd('SET_SP:' + document.getElementById('inSp').value);
-  cmd('SET_KP:' + document.getElementById('inKp').value);
-  cmd('SET_KI:' + document.getElementById('inKi').value);
-  cmd('SET_KD:' + document.getElementById('inKd').value);
+  for (var id in PARAMS) cmd(PARAMS[id][1] + ':' + document.getElementById(id).value);
   cmd('SAVE_PARAMS');
 }
 function highlightMode(m) {
@@ -415,6 +485,9 @@ void setup() {
 
   pinMode(PIN_PUMP_MOSFET, OUTPUT);
   digitalWrite(PIN_PUMP_MOSFET, LOW);
+  ledcSetup(PUMP_PWM_CHANNEL, PUMP_PWM_FREQ_HZ, PUMP_PWM_RES_BITS);
+  ledcAttachPin(PIN_PUMP_MOSFET, PUMP_PWM_CHANNEL);
+  ledcWrite(PUMP_PWM_CHANNEL, 0);     // pompa OFF sejak awal
 
   ledcSetup(HEATER_PWM_CHANNEL, HEATER_PWM_FREQ_HZ, HEATER_PWM_RES_BITS);
   ledcAttachPin(PIN_HEATER_MOSFET, HEATER_PWM_CHANNEL);
@@ -443,10 +516,18 @@ void setup() {
 
   // --- Preferences: load setpoint & gains tersimpan, kalau ada ---
   prefs.begin("swhpid", false);
-  pidSetpoint = prefs.getFloat("sp", pidSetpoint);
-  pidKp       = prefs.getFloat("kp", pidKp);
-  pidKi       = prefs.getFloat("ki", pidKi);
-  pidKd       = prefs.getFloat("kd", pidKd);
+  pidSetpoint   = prefs.getFloat("sp", pidSetpoint);
+  pidHeater.kp  = prefs.getFloat("kp", pidHeater.kp);   // key lama, tetap kompatibel
+  pidHeater.ki  = prefs.getFloat("ki", pidHeater.ki);
+  pidHeater.kd  = prefs.getFloat("kd", pidHeater.kd);
+  pidPump.kp    = prefs.getFloat("pkp", pidPump.kp);
+  pidPump.ki    = prefs.getFloat("pki", pidPump.ki);
+  pidPump.kd    = prefs.getFloat("pkd", pidPump.kd);
+  dtOn          = prefs.getFloat("dton", dtOn);
+  dtOff         = prefs.getFloat("dtoff", dtOff);
+  pumpMinDuty   = prefs.getFloat("pmin", pumpMinDuty);
+  luxMalam      = prefs.getFloat("luxm", luxMalam);
+  luxSiang      = prefs.getFloat("luxs", luxSiang);
   pidSetpoint = constrain(pidSetpoint, SETPOINT_MIN_C, SETPOINT_MAX_C);
 
   // --- WiFi SoftAP ---
@@ -472,7 +553,7 @@ void setup() {
   lastCycleTime = millis();
   Serial.println(F("Setup selesai. Mode awal: MANUAL (lihat catatan keamanan #3)."));
   Serial.println(F("CSV backup header:"));
-  Serial.println(F("ms,suhu_tangki,suhu_kolektor,lux,night,mode,heaterDuty,pump"));
+  Serial.println(F("ms,suhu_tangki,suhu_kolektor,lux,night,mode,heaterDuty,pumpDuty"));
 }
 
 // ================================================================================
@@ -497,16 +578,19 @@ void handleCommand(String msg) {
   if (msg == "MODE:MANUAL") {
     currentMode = MODE_MANUAL;
     manualHeaterOn = false;   // selalu mulai OFF tiap masuk mode Manual, demi keamanan
-    ledcWrite(HEATER_PWM_CHANNEL, 0);
+    statusPump = false;
+    setHeater(0);
+    setPump(0);
   } else if (msg == "MODE:STEP_TEST") {
     currentMode = MODE_STEP_TEST;
-    pidOutputSum = 0; // reset biar gak nyampur sama sesi PID sebelumnya
+    resetPID(pidHeater); // reset biar gak nyampur sama sesi PID sebelumnya
+    resetPID(pidPump);
   } else if (msg == "MODE:AUTO_PID") {
     currentMode = MODE_AUTO_PID;
-    pidOutputSum = 0;
-    pidLastInput = NAN;
+    resetPID(pidHeater);
+    resetPID(pidPump);
   } else if (msg == "PUMP:ON") {
-    statusPump = true;
+    if (currentMode == MODE_MANUAL) statusPump = true;  // di mode lain pompa milik PID
   } else if (msg == "PUMP:OFF") {
     statusPump = false;
   } else if (msg == "HEATER:ON") {
@@ -526,16 +610,44 @@ void handleCommand(String msg) {
   } else if (msg.startsWith("SET_SP:")) {
     pidSetpoint = constrain(msg.substring(7).toFloat(), SETPOINT_MIN_C, SETPOINT_MAX_C);
   } else if (msg.startsWith("SET_KP:")) {
-    pidKp = msg.substring(7).toFloat();
+    pidHeater.kp = max(0.0f, msg.substring(7).toFloat());
   } else if (msg.startsWith("SET_KI:")) {
-    pidKi = msg.substring(7).toFloat();
+    pidHeater.ki = max(0.0f, msg.substring(7).toFloat());
   } else if (msg.startsWith("SET_KD:")) {
-    pidKd = msg.substring(7).toFloat();
+    pidHeater.kd = max(0.0f, msg.substring(7).toFloat());
+  } else if (msg.startsWith("SET_PKP:")) {
+    pidPump.kp = max(0.0f, msg.substring(8).toFloat());
+  } else if (msg.startsWith("SET_PKI:")) {
+    pidPump.ki = max(0.0f, msg.substring(8).toFloat());
+  } else if (msg.startsWith("SET_PKD:")) {
+    pidPump.kd = max(0.0f, msg.substring(8).toFloat());
+  } else if (msg.startsWith("SET_DTON:")) {
+    // Dashboard kirim DTON dulu baru DTOFF, jadi DTOFF yang menyesuaikan.
+    dtOn = constrain(msg.substring(9).toFloat(), 0.5f, 50.0f);
+    if (dtOff >= dtOn) dtOff = max(0.0f, dtOn - 0.5f);
+  } else if (msg.startsWith("SET_DTOFF:")) {
+    dtOff = constrain(msg.substring(10).toFloat(), 0.0f, dtOn - 0.5f);
+  } else if (msg.startsWith("SET_PMIN:")) {
+    pumpMinDuty = constrain(msg.substring(9).toFloat(), 0.0f, 100.0f);
+  } else if (msg.startsWith("SET_LUXM:")) {
+    // Dashboard kirim LUXM dulu baru LUXS, jadi LUXS yang menyesuaikan.
+    luxMalam = max(0.0f, msg.substring(9).toFloat());
+    if (luxSiang < luxMalam) luxSiang = luxMalam;
+  } else if (msg.startsWith("SET_LUXS:")) {
+    luxSiang = max(luxMalam, msg.substring(9).toFloat());
   } else if (msg == "SAVE_PARAMS") {
     prefs.putFloat("sp", pidSetpoint);
-    prefs.putFloat("kp", pidKp);
-    prefs.putFloat("ki", pidKi);
-    prefs.putFloat("kd", pidKd);
+    prefs.putFloat("kp", pidHeater.kp);
+    prefs.putFloat("ki", pidHeater.ki);
+    prefs.putFloat("kd", pidHeater.kd);
+    prefs.putFloat("pkp", pidPump.kp);
+    prefs.putFloat("pki", pidPump.ki);
+    prefs.putFloat("pkd", pidPump.kd);
+    prefs.putFloat("dton", dtOn);
+    prefs.putFloat("dtoff", dtOff);
+    prefs.putFloat("pmin", pumpMinDuty);
+    prefs.putFloat("luxm", luxMalam);
+    prefs.putFloat("luxs", luxSiang);
     Serial.println(F("[INFO] Parameter disimpan ke flash (Preferences)."));
   }
 }
@@ -556,8 +668,12 @@ void loop() {
   }
 
   if (dsPhase == DS_WAITING_CONVERSION && (now - dsRequestTime >= DS18B20_CONV_WAIT_MS)) {
-    suhuKolektor = sensorKolektor.getTempCByIndex(0);
-    suhuTangki   = sensorTangki.getTempCByIndex(0);
+    // DS18B20 yang terputus/CRC gagal mengembalikan -127 (DEVICE_DISCONNECTED_C),
+    // BUKAN NAN -- dikonversi di sini supaya semua pengecekan isnan() berlaku.
+    float k = sensorKolektor.getTempCByIndex(0);
+    float tg = sensorTangki.getTempCByIndex(0);
+    suhuKolektor = (k  <= DEVICE_DISCONNECTED_C) ? NAN : k;
+    suhuTangki   = (tg <= DEVICE_DISCONNECTED_C) ? NAN : tg;
     lux = lightMeter.readLightLevel();
     dsPhase = DS_IDLE;
 
@@ -574,7 +690,13 @@ void loop() {
 }
 
 void updateDayNight() {
-  isNightRaw = (lux >= 0) ? (lux < BH1750_LUX_MALAM_AMBANG) : isNightRaw; // lux<0 = gagal baca, pertahankan state lama
+  // Histeresis dua ambang: status cuma pindah kalau lux melewati ambang
+  // seberangnya, jadi tidak bolak-balik saat senja/fajar/awan lewat.
+  // lux<0 (atau NAN) = gagal baca, pertahankan state lama.
+  if (lux >= 0) {
+    if (isNightRaw && lux > luxSiang)        isNightRaw = false;
+    else if (!isNightRaw && lux < luxMalam)  isNightRaw = true;
+  }
   switch (dayNightOverride) {
     case DN_FORCE_DAY:   isNightEffective = false; break;
     case DN_FORCE_NIGHT: isNightEffective = true;  break;
@@ -582,65 +704,107 @@ void updateDayNight() {
   }
 }
 
+void setHeater(float duty) {
+  heaterDutyPercent = duty;
+  ledcWrite(HEATER_PWM_CHANNEL, (int)(duty * 255.0 / 100.0));
+}
+
+void setPump(float duty) {
+  pumpDutyPercent = duty;
+  ledcWrite(PUMP_PWM_CHANNEL, (int)(duty * 255.0 / 100.0));
+}
+
 void runControlLogic() {
+  bool tangkiOk = !isnan(suhuTangki);
+
   // --- Safety cutoff, berlaku SELALU, di atas mode apa pun ---
-  if (!isnan(suhuTangki) && suhuTangki >= SAFETY_CUTOFF_C) {
+  if (tangkiOk && suhuTangki >= SAFETY_CUTOFF_C) {
     heaterEmergencyOff = true;
   }
 
+  // --- Gerbang dT kolektor-tangki (histeresis) ---
+  if (!tangkiOk || isnan(suhuKolektor)) {
+    dtOk = false;
+  } else {
+    float dT = suhuKolektor - suhuTangki;
+    if (!dtOk && dT >= dtOn)       dtOk = true;
+    else if (dtOk && dT < dtOff)   dtOk = false;
+  }
+
   if (heaterEmergencyOff) {
-    heaterDutyPercent = 0;
-    ledcWrite(HEATER_PWM_CHANNEL, 0);
-    digitalWrite(PIN_PUMP_MOSFET, statusPump ? HIGH : LOW); // pompa tetap boleh manual
+    // Pompa ikut mati: di sistem looping, pompa = sumber panas siang hari.
+    setHeater(0);
+    setPump(0);
     return;
   }
 
-  digitalWrite(PIN_PUMP_MOSFET, statusPump ? HIGH : LOW);
-
   switch (currentMode) {
     case MODE_MANUAL:
-      // Manual ON/OFF heater -- dipakai buat bring-up test fisik MOSFET
-      // (lihat command "HEATER:ON"/"HEATER:OFF"), TIDAK ada logic PID di sini.
-      heaterDutyPercent = manualHeaterOn ? 100.0 : 0.0;
-      ledcWrite(HEATER_PWM_CHANNEL, manualHeaterOn ? 255 : 0);
+      // Bring-up test fisik MOSFET, TIDAK ada logic PID di sini. Heater
+      // manual ditolak kalau sensor tangki error (suhu gak bisa dipantau).
+      setHeater((manualHeaterOn && tangkiOk) ? 100.0 : 0.0);
+      setPump(statusPump ? 100.0 : 0.0);
       break;
 
     case MODE_STEP_TEST:
-      // Heater full ON (100% duty) terus-menerus sampai mode diganti atau
-      // safety cutoff kena -- ini JANTUNG Tahap 2 di jadwal.
-      heaterDutyPercent = 100.0;
-      ledcWrite(HEATER_PWM_CHANNEL, 255);
+      // Step 100% open-loop -- JANTUNG Tahap 2 di jadwal. Aktuatornya ikut
+      // siang/malam: MALAM -> heater, SIANG -> pompa (tanpa gerbang dT,
+      // operator mulai test saat kolektor sudah panas).
+      if (!tangkiOk) {
+        setHeater(0);
+        setPump(0);
+      } else if (isNightEffective) {
+        setHeater(100.0);
+        setPump(0);
+      } else {
+        setHeater(0);
+        setPump(100.0);
+      }
       break;
 
     case MODE_AUTO_PID:
-      if (!isNightEffective) {
-        // Siang -> heater WAJIB off, PID gak jalan, sesuai gating siang/malam.
-        heaterDutyPercent = 0;
-        ledcWrite(HEATER_PWM_CHANNEL, 0);
-        pidOutputSum = 0;
-        pidLastInput = NAN;
+      if (isNightEffective) {
+        // MALAM (termasuk mendung yang terdeteksi malam): murni heater.
+        setPump(0);
+        resetPID(pidPump);
+        setHeater(computePID(pidHeater, suhuTangki, pidSetpoint));
       } else {
-        heaterDutyPercent = computePID(suhuTangki, pidSetpoint);
-        ledcWrite(HEATER_PWM_CHANNEL, (int)(heaterDutyPercent * 255.0 / 100.0));
+        // SIANG: heater mati, panas dibawa pompa dari kolektor.
+        setHeater(0);
+        resetPID(pidHeater);
+        if (dtOk) {
+          float u = computePID(pidPump, suhuTangki, pidSetpoint);
+          // Di bawah duty minimum pompa bisa macet -> naikkan ke minimum,
+          // kecuali PID memang minta berhenti (~0).
+          setPump(u < 0.5 ? 0.0 : max(u, pumpMinDuty));
+        } else {
+          setPump(0);
+          resetPID(pidPump);
+        }
       }
       break;
   }
 }
 
+void resetPID(PidCtrl &pid) {
+  pid.outputSum = 0;
+  pid.lastInput = NAN;
+}
+
 // PID diskrit, clamped-integral anti-windup, derivative-on-measurement.
-float computePID(float input, float setpoint) {
-  if (isnan(input)) return 0; // sensor gagal baca -> jangan drive heater buta
+float computePID(PidCtrl &pid, float input, float setpoint) {
+  if (isnan(input)) return 0; // sensor gagal baca -> jangan drive aktuator buta
 
   float dtSec = SENSOR_CYCLE_MS / 1000.0;
   float error = setpoint - input;
 
-  pidOutputSum += (pidKi * error * dtSec);
-  pidOutputSum = constrain(pidOutputSum, PID_OUT_MIN, PID_OUT_MAX);
+  pid.outputSum += (pid.ki * error * dtSec);
+  pid.outputSum = constrain(pid.outputSum, PID_OUT_MIN, PID_OUT_MAX);
 
-  float dInput = isnan(pidLastInput) ? 0 : (input - pidLastInput) / dtSec;
-  pidLastInput = input;
+  float dInput = isnan(pid.lastInput) ? 0 : (input - pid.lastInput) / dtSec;
+  pid.lastInput = input;
 
-  float output = pidKp * error + pidOutputSum - pidKd * dInput;
+  float output = pid.kp * error + pid.outputSum - pid.kd * dInput;
   return constrain(output, PID_OUT_MIN, PID_OUT_MAX);
 }
 
@@ -654,15 +818,25 @@ void sendTelemetry() {
   json += "\"kolektor\":" + String(isnan(suhuKolektor)?-127:suhuKolektor, 2) + ",";
   json += "\"lux\":" + String(lux, 1) + ",";
   json += "\"night\":" + String(isNightEffective ? "true" : "false") + ",";
-  json += "\"pump\":" + String(statusPump ? "true" : "false") + ",";
+  json += "\"pump\":" + String(pumpDutyPercent > 0 ? "true" : "false") + ",";
   json += "\"heaterDuty\":" + String(heaterDutyPercent, 1) + ",";
   json += "\"mode\":\"" + modeStr + "\",";
   json += "\"dnOverride\":\"" + dnStr + "\",";
   json += "\"emergency\":" + String(heaterEmergencyOff ? "true" : "false") + ",";
   json += "\"sp\":" + String(pidSetpoint, 2) + ",";
-  json += "\"kp\":" + String(pidKp, 3) + ",";
-  json += "\"ki\":" + String(pidKi, 3) + ",";
-  json += "\"kd\":" + String(pidKd, 3);
+  json += "\"kp\":" + String(pidHeater.kp, 3) + ",";
+  json += "\"ki\":" + String(pidHeater.ki, 3) + ",";
+  json += "\"kd\":" + String(pidHeater.kd, 3) + ",";
+  json += "\"pumpDuty\":" + String(pumpDutyPercent, 1) + ",";
+  json += "\"dtOk\":" + String(dtOk ? "true" : "false") + ",";
+  json += "\"pkp\":" + String(pidPump.kp, 3) + ",";
+  json += "\"pki\":" + String(pidPump.ki, 3) + ",";
+  json += "\"pkd\":" + String(pidPump.kd, 3) + ",";
+  json += "\"dtOn\":" + String(dtOn, 1) + ",";
+  json += "\"dtOff\":" + String(dtOff, 1) + ",";
+  json += "\"pmin\":" + String(pumpMinDuty, 0) + ",";
+  json += "\"luxM\":" + String(luxMalam, 0) + ",";
+  json += "\"luxS\":" + String(luxSiang, 0);
   json += "}";
 
   ws.textAll(json);
@@ -680,16 +854,21 @@ void updateLCD() {
   lcd.setCursor(0,1);
   lcd.print(F("SP:"));
   lcd.print(pidSetpoint,1);
-  lcd.print(F(" Dty:"));
+  lcd.print(F(" H:"));
   lcd.print((int)heaterDutyPercent);
-  lcd.print(F("%  "));
+  lcd.print(F(" P:"));
+  lcd.print((int)pumpDutyPercent);
+  lcd.print(F("   "));
 
   lcd.setCursor(0,2);
   lcd.print(F("Mode:"));
   lcd.print(currentMode==MODE_MANUAL?"MANUAL  ":currentMode==MODE_STEP_TEST?"STEPTEST":"AUTOPID ");
 
   lcd.setCursor(0,3);
-  lcd.print(heaterEmergencyOff ? F("!! SAFETY CUTOFF !!") : (isNightEffective ? F("MALAM - PID aktif  ") : F("SIANG - heater off  ")));
+  lcd.print(heaterEmergencyOff ? F("!! SAFETY CUTOFF !! ")
+            : isNightEffective ? F("MALAM - PID heater  ")
+            : dtOk             ? F("SIANG - PID pompa   ")
+                               : F("SIANG - tunggu dT   "));
 }
 
 void logSerialCSV(unsigned long t) {
@@ -700,5 +879,5 @@ void logSerialCSV(unsigned long t) {
   Serial.print(isNightEffective?1:0); Serial.print(",");
   Serial.print(currentMode); Serial.print(",");
   Serial.print(heaterDutyPercent,1); Serial.print(",");
-  Serial.println(statusPump?1:0);
+  Serial.println(pumpDutyPercent,1);
 }

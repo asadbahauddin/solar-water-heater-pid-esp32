@@ -102,7 +102,10 @@ class CsvTail:
         d["sp"].append(to_float(row.get("sp")))
         d["lux"].append(to_float(row.get("lux"), 0))
         d["duty"].append(to_float(row.get("heaterDuty")))
-        d["pump"].append(to_float(row.get("pump")) * 100)  # 1/0 -> 100/0 biar sejajar skala %
+        if row.get("pumpDuty"):
+            d["pump"].append(to_float(row["pumpDuty"]))
+        else:  # CSV firmware lama: pump cuma 1/0 -> 100/0 biar sejajar skala %
+            d["pump"].append(to_float(row.get("pump")) * 100)
 
 
 def main():
@@ -144,7 +147,7 @@ def main():
     ax_lux.grid(alpha=0.3)
 
     (l_duty,) = ax_out.plot([], [], color="tab:purple", lw=1.2, label="Heater duty")
-    (l_pump,) = ax_out.step([], [], color="tab:green", lw=1.0, where="post", label="Pompa (ON=100)")
+    (l_pump,) = ax_out.plot([], [], color="tab:green", lw=1.2, label="Pompa duty")
     ax_out.set_ylabel("%")
     ax_out.set_ylim(-5, 105)
     ax_out.legend(loc="upper left", fontsize=9)
