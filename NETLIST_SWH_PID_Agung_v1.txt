@@ -1,0 +1,1140 @@
+================================================================================
+NETLIST LENGKAP - SOLAR WATER HEATER PID TEMPERATURE CONTROL
+ESP32 DevKit
+Versi  : 3.1 (v3.0 = revisi arsitektur besar soal PID pindah ke heater;
+         v3.1 = pompa balik dari relay diskrit ke MOSFET, lihat catatan
+         versi di bawah -- WAJIB dibaca)
+Client : Agung (Priyagung Dharma Hutomo) — Teknik Mekatronika, UTM
+Scope  : PCB + firmware saja (mekanik/rangka di luar scope Asad)
+================================================================================
+
+CATATAN PERUBAHAN BESAR DI VERSI 3.0 (baca dulu sebelum baca bagian lain):
+
+  0. PERUBAHAN ARSITEKTUR PALING BESAR di revisi ini -- hasil diskusi
+     ulang sistem fisik yang sebenarnya mau dibangun Agung, TERNYATA BEDA
+     dari yang digambarkan proposal tertulis:
+     - Kolektor -> tangki: PASIF (thermosiphon, air naik sendiri karena
+       beda massa jenis panas-dingin), BUKAN dipompa. Tidak ada aktuator
+       elektronik di jalur ini.
+     - Tangki -> keran: SATU pompa 12V/5A, fungsinya cuma ANTAR AIR ke
+       titik pakai (distribusi), dipakai siang-malam sesuai permintaan
+       user, TIDAK ADA HUBUNGANNYA dengan pengaturan suhu.
+     - Sumber panas: SIANG = kolektor surya (pasif), MALAM = heater
+       listrik (aktif, backup).
+     - KONSEKUENSI: karena pompa bukan lagi aktuator yang mempengaruhi
+       suhu, PID PINDAH ke HEATER (bukan lagi ke pompa seperti versi
+       1.x/2.x). Pompa jadi kontrol ON/OFF sederhana dengan gerbang suhu
+       (lihat bagian 3 & 9).
+     - !! PERINGATAN UNTUK AGUNG (disampaikan lewat Asad, WAJIB
+       ditindaklanjuti ke dosen pembimbing) !!: proposal tertulis yang
+       sudah di-ACC (Diagram Blok Kontrol Gambar 3.10, Flowchart Gambar
+       3.11) menggambarkan PID->PWM->KECEPATAN POMPA, dan Batasan Masalah
+       poin 5 bahkan menyatakan "tanpa mempertimbangkan sumber pemanas
+       cadangan (auxiliary heater)". Sistem yang direalisasikan sekarang
+       (thermosiphon pasif + PID di heater + pompa cuma distribusi) BEDA
+       CUKUP BESAR dari dokumen yang disetujui dosen. Ini perlu
+       dikonfirmasi/didiskusikan ke dosen pembimbing SEBELUM sidang --
+       bukan keputusan yang bisa diambil sepihak di level PCB/firmware.
+  1. MCU ganti Arduino Mega 2560 -> ESP32 DevKit, atas permintaan client.
+     KONSEKUENSI PENTING: level logic ESP32 = 3.3V (BUKAN 5V seperti Mega).
+     Semua pin I/O ESP32 TIDAK toleran 5V -- kalau ada sinyal 5V nyasar ke
+     GPIO ESP32 (mis. dari LCD backpack yang di-supply 5V dengan pull-up
+     I2C ke VCC-nya), risiko GPIO/chip rusak permanen. Ini bukan sekadar
+     beda pinout, tapi beda domain tegangan yang wajib ditangani serius --
+     lihat bagian 2 dan 6.
+  2. Heater sekarang pakai SSR (solid state relay, bukan relay mekanik)
+     karena PID time-proportional control (nyala-mati cepat berulang tiap
+     siklus, mis. window 1 detik) akan mengaus kontak relay mekanik dalam
+     waktu singkat. SSR solid-state, tidak ada bagian bergerak, aman
+     di-switch sesering apapun. Tetap di jalur AC/PLN terpisah (tidak
+     berubah dari keputusan sebelumnya).
+  3. Pompa sekarang pakai relay DISKRIT (transistor+relay bare+flyback),
+     BUKAN modul MOSFET PWM lagi -- karena pompa tidak lagi butuh
+     modulasi kecepatan (lihat poin 0). Ini desain yang sebelumnya
+     dipakai untuk heater di versi 1.x/2.x, sekarang dipindah ke pompa.
+  4. Sizing panel/baterai (bagian 1) pakai ASUMSI: PSH (peak sun hour)
+     Madura/Jatim ~4 jam/hari -- WAJIB dicek ke data irradiance riil
+     (PVGIS/NASA POWER utk koordinat lokasi tugas akhir) sebelum beli part
+     final, ini estimasi perencanaan awal, bukan angka final.
+
+CATATAN PERUBAHAN DI VERSI 3.1:
+
+  5. Pompa BALIK ke MOSFET diskrit (IRLB8721PbF), gantikan relay diskrit
+     dari v3.0 -- lihat rasional lengkap di bagian 3. Ringkasnya: sekarang
+     ON/OFF (firmware TIDAK berubah, masih digitalWrite biasa, BUKAN PWM
+     aktif), tapi hardware disiapkan supaya kalau nanti Agung/dosen minta
+     kecepatan pompa bisa dimodulasi, tinggal ganti ke ledcWrite() di
+     firmware tanpa rewiring PCB. Ini juga menghapus TBD lama soal rating
+     kontak DC relay (tidak relevan lagi, tidak ada kontak mekanis).
+  6. Rotary encoder + push button DIHAPUS, diganti web page + WebSocket
+     yang di-hosting ESP32 sendiri utk input setpoint (WiFi sudah onboard,
+     tanpa komponen tambahan) -- EKSPLISIT discope-kan "buat demo dulu"
+     oleh client, sengaja tanpa cloud/app pihak ketiga. LCD tetap ada utk
+     status lokal. Lihat bagian 6 & 9. KONSEKUENSI: power budget bagian 1
+     BELUM direvisi utk beban WiFi aktif terus-menerus -- lihat TBD.
+  7. Rail suplai logic dipecah jadi 2 buck converter terpisah: BUCK_ESP
+     (12V->7V, khusus ESP32) dan BUCK_LCD (12V->5V, khusus LCD) --
+     sebelumnya cuma 1 buck (12V->5V) yang dipakai bareng. Perubahan ini
+     atas pengalaman lapangan client (14 proyek ESP32: WiFi gagal muncul
+     kalau VIN cuma ~5V, margin 7V terbukti menyelesaikan ini secara
+     konsisten). Mekanisme: transient arus spike WiFi bisa bikin tegangan
+     ambles sesaat di bawah ambang dropout regulator onboard devkit kalau
+     marginnya pas-pasan di 5V. LCD tidak ikut naik ke 7V karena gak
+     punya masalah transient serupa. Lihat bagian 2 utk detail lengkap.
+
+--------------------------------------------------------------------------------
+TOPOLOGI SISTEM
+--------------------------------------------------------------------------------
+
+  [PANEL SURYA 200Wp]
+            |
+   MPPT CHARGE CONTROLLER (in: panel, out: baterai 12V, >=20A)
+            |
+     BATERAI 12V (100Ah lead-acid/AGM ATAU ~55-60Ah LiFePO4, lihat bag.1)
+            |
+     FUSE_MAIN (8A slow-blow)
+            |
+     D_REVPOL (schottky SB1040 10A/40V, proteksi salah polaritas)
+            |
+     SW_MAIN (on/off utama)
+            |
+     TVS_12V (SMBJ18A, opsional tapi disarankan)
+            |
+     NET_12V_BUS
+            |
+   +--------+------------------+
+   |                           |
+FUSE_PUMP(7A)              FUSE_BUCK(1A) -- dipakai bersama 2 buck di bawah
+   |                           |
+Q_PUMP (MOSFET        +-------+-------+
+ IRLB8721)             |               |
+-> POMPA DC (ON/OFF, BUCK_ESP        BUCK_LCD
+gerbang suhu malam,  (12V->7V)      (12V->5V)
+future-proof PWM)       |               |
+                    NET_7V_ESP     NET_5V_LOGIC ------------+
+                         |               |                  |
+                    ESP32 DEVKIT    LDO_3V3 (5V->3.3V)      | (LCD sisi 5V
+                    (pin 5V/VIN,         |                   |  lewat level
+                    margin WiFi,   NET_3V3_LOGIC             |  shifter)
+                    lihat bag.2)         |                   |
+                         |          DS18B20 x2 (tangki=PV PID, kolektor=
+                         |          monitoring) + BH1750 (sensor cahaya,
+                         |          gerbang siang/malam) + sisi LV level
+                         |          shifter
+                         |
+                    WiFi (web/WebSocket setpoint, hosting sendiri, v3.1)
+                    + GPIO -> R_SSR_SIG -> SSR_HEATER -> HEATER (PID
+                    time-proportional, lihat bagian 4)
+                    + GPIO -> R_GATE -> Q_PUMP (lihat kolom kiri)
+                    + I2C (GPIO21/22) -> level shifter -> LCD + BH1750
+
+
+  [STEKER AC 220V — DARI PLN, TIDAK BERUBAH DARI DESAIN SEBELUMNYA]
+        |             ; JALUR TERPISAH TOTAL -- TIDAK NYAMBUNG ke NET_12V_BUS
+   FUSE_AC (3A)        ; sama sekali (beda sumber: panel surya vs PLN),
+        |             ; TIDAK DIRUTEKAN di PCB utama, hanya lewat SSR_HEATER
+   SSR_HEATER [load in] -> [load out] -> ELEMEN PEMANAS (500W, DIKONFIRMASI produk dibeli) -> netral AC kembali
+
+; KEPUTUSAN (lihat catatan versi 3.0 di atas): heater TETAP dari PLN, bukan
+; dari panel surya+baterai -- backup heater butuh sumber yang selalu ada
+; terlepas cuaca, sedangkan panel surya sendiri butuh matahari buat isi
+; baterainya. Panel surya hanya menanggung rail 12V DC (pompa+logic ESP32),
+; yang kebutuhan dayanya memang selaras dengan jam matahari tersedia.
+;
+; PID SEKARANG DI HEATER (bukan pompa) -- PV = suhu tangki, MV = duty
+; cycle time-proportional ke SSR. Pompa jadi ON/OFF sederhana dengan
+; gerbang suhu: malam, pompa cuma boleh ON kalau T_tangki sudah capai
+; setpoint (heater sudah kerja duluan) -- lihat bagian 3 & 9.
+
+--------------------------------------------------------------------------------
+KONVENSI NETLIST
+--------------------------------------------------------------------------------
+  NET_xxx     = nama jalur/node
+  ->          = terhubung ke
+  [PIN_xxx]   = nama pin komponen
+  ; komentar  = penjelasan
+  TBD         = menunggu data/keputusan lebih lanjut, jangan solder dulu
+  ASUMSI      = dipakai sebagai basis desain, wajib dikonfirmasi ke part asli
+  DIKONFIRMASI= sudah dipastikan dari jawaban client, tidak perlu ditanya lagi
+
+--------------------------------------------------------------------------------
+1. POWER INPUT & DISTRIBUSI (RAIL 12V DC — pompa + logic, DARI PANEL SURYA)
+--------------------------------------------------------------------------------
+
+; DIKONFIRMASI dari client: pompa DC = 12V, 5A (60W). Rail 12V ini SEKARANG
+; disuplai dari panel surya + baterai (bukan adaptor AC-DC dari PLN lagi),
+; atas permintaan client -- heater AC 500W TETAP di PLN terpisah (lihat
+; topologi & catatan versi 2.0 di awal file).
+;
+; === PERHITUNGAN SIZING PANEL SURYA + BATERAI ===
+; Asumsi (WAJIB verifikasi ke data irradiance riil sebelum beli part final):
+;   - PSH (peak sun hour) Madura/Jatim ~4 jam/hari (estimasi konservatif,
+;     cek PVGIS/NASA POWER utk koordinat lokasi TA -- musim hujan bisa
+;     lebih rendah dari ini)
+;   - Efisiensi sistem (charge controller+kabel+suhu+debu) ~75%
+;   - Pompa jalan 8 jam/hari (jam kerja kolektor efektif), worst-case
+;     duty 100% (5A kontinu) -- sengaja dipakai angka worst-case, bukan
+;     rata-rata, konsisten dengan gaya desain "paling robust" di proyek ini
+;   - Beban logic (ESP32+sensor+LCD) ~1.5W rata-rata, nyala 24 jam --
+;     !! BELUM DIREVISI DI v3.1 !!: angka ini dari era encoder (idle-ish,
+;     WiFi off). Sekarang WiFi ESP32 AKTIF terus (web server+WebSocket
+;     utk setpoint) -- ESP32 dgn WiFi aktif tipikal jauh lebih boros
+;     drpd idle (ASUMSI kasar ~80-150mA rata-rata saat WiFi connected,
+;     vs <50mA tanpa WiFi -- perlu verifikasi ke datasheet/measurement
+;     modul devkit spesifik). Wh/day di bawah ini KEMUNGKINAN under-
+;     estimate sampai direvisi -- lihat TBD baru di bagian akhir file.
+;
+; Energi harian dibutuhkan:
+;   Pompa   : 60W x 8 jam = 480 Wh/hari
+;   Logic   : 1.5W x 24 jam = 36 Wh/hari (ASUMSI LAMA, WAJIB direvisi naik
+;             krn WiFi aktif -- lihat catatan di atas)
+;   TOTAL   : ~520 Wh/hari (ASUMSI LAMA, kemungkinan naik sedikit)
+;
+; Panel surya: 520 / (4 PSH x 0.75 efisiensi) = ~173 Wp -> DIBULATKAN ke
+; atas dengan margin ~20% -> REKOMENDASI: PANEL 200 Wp (mono/polycrystalline,
+; ukuran umum ~100x150cm, banyak tersedia lokal)
+;
+; Baterai (autonomy 1 hari -- sesuai keputusan client, artinya baterai
+; harus bisa nutup 1 hari penuh operasi tanpa matahari sama sekali):
+;   - Lead-acid/AGM (DoD aman 50%): 520/0.5 = 1040 Wh -> /12V = ~87Ah ->
+;     REKOMENDASI: 12V / 100Ah deep-cycle (lebih murah, lebih berat,
+;     cycle life lebih pendek)
+;   - LiFePO4 (DoD aman 80%): 520/0.8 = 650 Wh -> /12.8V = ~51Ah ->
+;     ALTERNATIF: 12.8V / 55-60Ah (lebih ringan, cycle life jauh lebih
+;     panjang, harga awal lebih tinggi -- makin terjangkau & makin umum
+;     dijual lokal Indonesia)
+;   PILIH SALAH SATU sesuai budget client -- keduanya valid secara teknis,
+;   MPPT controller di bawah harus di-set profil charging yang sesuai
+;   (lead-acid vs lithium beda kurva charging, JANGAN pakai profil yang
+;   salah -- bisa merusak baterai atau bikin umur pakai jauh lebih pendek).
+;
+; Charge controller: panel 200Wp @ ~18-20V Vmp -> arus kerja ~10-11A ->
+; REKOMENDASI: MPPT 20A (lebih efisien dari PWM terutama saat suhu panel
+; tinggi/pencahayaan tidak ideal, harga kelas ini sudah terjangkau)
+
+BATERAI_12V [PIN_POS] -> FUSE_MAIN (8A slow-blow) [PIN_A]
+FUSE_MAIN [PIN_B] -> D_REVPOL (schottky SB1040, 10A/40V) [PIN_ANODE]
+D_REVPOL [PIN_CATHODE] -> SW_MAIN [PIN_A]
+SW_MAIN [PIN_B] -> NET_12V_BUS
+BATERAI_12V [PIN_NEG] -> NET_GND_BUS
+
+; D_REVPOL DIREVISI dari SS54 (5A) ke SB1040 (10A/40V) -- SS54 sudah
+; mepet/kurang begitu pompa ternyata 5A (diode ini menanggung SELURUH
+; arus bus 12V, bukan cuma logic).
+
+; === PROTEKSI TAMBAHAN ===
+; D_REVPOL: proteksi kalau jack DC/adaptor kesalahan polaritas -- kesalahan
+; pemasangan yang sering terjadi di alat rakitan sendiri. Schottky dipilih
+; supaya drop tegangan kecil (~0.4-0.5V), sisa tegangan (>11.5V) masih
+; jauh di atas kebutuhan minimum buck converter (butuh >6V input).
+;
+; TVS_12V: opsional, tapi disarankan karena ada MOSFET pompa yang bisa
+; menghasilkan spike tegangan balik saat switching. Pasang paralel,
+; sedekat mungkin ke titik masuk, sebelum C_12V_BULK.
+; SMBJ18A itu UNIDIRECTIONAL (bukan simetris) -- polaritas WAJIB benar,
+; beda dari TVS bidirectional (varian "CA", mis. SMBJ18CA) yang gak
+; punya polaritas. Sudah dicek ke datasheet resmi Littelfuse: standoff
+; 18V (VRWM, bukan tegangan clamp -- ini cuma tegangan kerja normal di
+; bawahnya dia idle), breakdown 20.0-22.1V @1mA, clamp maksimum
+; sebenarnya 29.2V @arus pulsa puncak. Fisik: kathode ditandai PITA/BAND
+; di badan komponen (sama kayak dioda rectifier biasa).
+TVS_12V (SMBJ18A, standoff 18V/clamp maks 29.2V, opsional) [PIN_KATODE] -> NET_12V_BUS  ; sisi BERPITA
+TVS_12V                                                     [PIN_ANODE]  -> NET_GND_BUS
+
+; === DISTRIBUSI 12V BUS ===
+NET_12V_BUS
+  -> FUSE_PUMP (7A) [PIN_A]   ; driver MOSFET + pompa -- REVISI dari 2.5A,
+                                ; sesuai pompa 5A DIKONFIRMASI + margin ~1.4x
+  -> FUSE_BUCK (1A) [PIN_A]   ; dipakai bersama BUCK_ESP + BUCK_LCD, lihat bag.2
+
+; === BULK DECOUPLING DI TITIK DISTRIBUSI ===
+C_12V_BULK (1000uF/25V) [PIN_POS] -> NET_12V_BUS
+C_12V_BULK               [PIN_NEG] -> NET_GND_BUS
+C_12V_CER  (100nF/50V)   [PIN_1]   -> NET_12V_BUS
+C_12V_CER                [PIN_2]   -> NET_GND_BUS
+
+NET_GND_BUS -> semua titik GND sistem (star ground, lihat bagian 8)
+
+--------------------------------------------------------------------------------
+2. BUCK CONVERTER - RAIL 7V (ESP32) + RAIL 5V (LCD) + LDO 3.3V (sensor)
+--------------------------------------------------------------------------------
+
+; REVISI (v3.1): rail logic dipecah jadi DUA buck converter terpisah,
+; bukan satu lagi -- atas masukan client berdasarkan pengalaman lapangan
+; 14 proyek ESP32: devkit yang disuplai persis di sekitar 5V sering
+; "WiFi gak muncul" (gagal connect/browni ng sesaat pas WiFi transmit).
+; MEKANISME (dikonfirmasi masuk akal secara teknis): ESP32 narik ARUS
+; SPIKE sesaat pas transmit WiFi (bisa 300-500mA sesaat, jauh di atas
+; rata-rata). Kalau VIN cuma pas-pasan di ~5V, regulator AMS1117 onboard
+; devkit butuh headroom (dropout, makin gede pas arus tinggi) di atas
+; 3.3V -- begitu ada spike arus dan tegangan sumber sedikit "ambles"
+; (drop kabel, respons regulator kurang cepat), tegangan bisa jatuh di
+; bawah ambang minimum itu sesaat, ESP32 brief-brownout pas lagi coba
+; connect WiFi. Kasih VIN dengan margin lebih (7V) mencegah ini karena
+; walau ada ambles sesaat, tetap di atas ambang minimum regulator.
+; TRADE-OFF yang disadari: 7V ke regulator onboard devkit itu buang lebih
+; banyak panas drpd 5V (P=(Vin-3.3)xI -- di 7V kira2 2x lebih panas drpd
+; di 5V pada arus yang sama), TAPI reliabilitas WiFi lebih penting drpd
+; efisiensi teoritis buat sistem yang harus jalan pas sidang. LCD TIDAK
+; ikut rail 7V ini -- LCD gak punya masalah transient kayak WiFi, cukup
+; rail 5V biasa (lebih dingin, gak ada alasan dikasih lebih).
+; C_ESP_ELCO (100uF, di bawah) WAJIB ditaruh SEDEKAT MUNGKIN ke pin VIN
+; devkit di PCB -- bantu redam spike arus WiFi secara lokal, lapisan
+; proteksi tambahan di luar soal besar tegangan VIN itu sendiri.
+
+; CATATAN: FUSE_BUCK (1A) dipakai BERSAMA oleh dua buck di bawah (bukan
+; fuse terpisah per buck) -- sengaja disederhanakan karena arus total
+; gabungan ESP+LCD di sisi 12V kecil banget (order ratusan mA), gak perlu
+; proteksi terpisah buat kasus sekecil ini. Kalau mau lebih konservatif,
+; boleh tambah fuse kedua, tapi bukan keharusan.
+
+; === RAIL 7V KHUSUS ESP32 (BUCK_ESP) ===
+FUSE_BUCK [PIN_B] -> BUCK_ESP (XL4015 atau sejenis, adjustable, di-set 7V, >=1A) [PIN_IN+]
+NET_GND_BUS       -> BUCK_ESP [PIN_IN-]
+BUCK_ESP [PIN_OUT+] -> NET_7V_ESP
+BUCK_ESP [PIN_OUT-] -> NET_GND_BUS
+
+; Suplai ESP32 devkit LANGSUNG ke pin 5V/VIN board (nama silkscreen board
+; biasanya tetap "5V" walau yang masuk 7V -- itu cuma nama pin, bukan
+; berarti board TIDAK toleran >5V, devkit ini sudah dikonfirmasi jalan
+; baik di 7V dari pengalaman client). JANGAN feed ke pin 3V3 board (itu
+; OUTPUT regulator onboard, bukan input -- feed situ bisa merusaknya).
+; Pin 3V3 board TIDAK dipakai sbg sumber eksternal -- semua sensor/
+; pull-up eksternal ambil dari LDO_3V3 terpisah (lihat bawah), supaya
+; beban sensor eksternal tidak numpang di regulator kecil bawaan devkit.
+NET_7V_ESP  -> ESP32_DEVKIT [PIN_5V_VIN]
+NET_GND_BUS -> ESP32_DEVKIT [PIN_GND]
+C_ESP_ELCO (100uF/16V) [PIN_POS] -> ESP32_DEVKIT [PIN_5V_VIN]  ; WAJIB dekat pin, lihat catatan di atas
+C_ESP_ELCO              [PIN_NEG] -> NET_GND_BUS
+
+; === RAIL 5V UNTUK LCD (BUCK_LCD) ===
+FUSE_BUCK [PIN_B] -> BUCK_LCD (XL4015 atau sejenis, adjustable, di-set 5V, >=1A) [PIN_IN+]
+NET_GND_BUS       -> BUCK_LCD [PIN_IN-]
+BUCK_LCD [PIN_OUT+] -> NET_5V_LOGIC   ; nama net dipertahankan "NET_5V_LOGIC" -- sekarang isinya cuma LCD + input LDO_3V3, bukan lagi ESP32
+BUCK_LCD [PIN_OUT-] -> NET_GND_BUS
+
+; Decoupling output 5V (LCD)
+C_LOG_ELCO (470uF/16V) [PIN_POS] -> NET_5V_LOGIC
+C_LOG_ELCO              [PIN_NEG] -> NET_GND_BUS
+C_LOG_CER  (100nF)      [PIN_1]   -> NET_5V_LOGIC
+C_LOG_CER               [PIN_2]   -> NET_GND_BUS
+
+; === LDO 3.3V (khusus sensor: DS18B20 x2, BH1750, sisi LV level shifter) ===
+; Diambil dari NET_5V_LOGIC (rail LCD, murni 5V) -- BUKAN dari NET_7V_ESP,
+; supaya AMS1117 di sini cuma nurunin selisih kecil (5-3.3=1.7V), bukan
+; (7-3.3=3.7V), tetap dingin & gak numpang ke rail yang khusus dijaga
+; margin buat ESP32.
+NET_5V_LOGIC -> LDO_3V3 (AMS1117-3.3 atau MCP1700-3.3, >=500mA) [PIN_IN]
+NET_GND_BUS  -> LDO_3V3 [PIN_GND]
+LDO_3V3 [PIN_OUT] -> NET_3V3_LOGIC
+C_LDO_IN  (100nF) [PIN_1] -> NET_5V_LOGIC
+C_LDO_IN          [PIN_2] -> NET_GND_BUS
+C_LDO_OUT (10uF)  [PIN_1] -> NET_3V3_LOGIC
+C_LDO_OUT         [PIN_2] -> NET_GND_BUS
+
+--------------------------------------------------------------------------------
+3. MOSFET POMPA — DISKRIT (ON/OFF sekarang, future-proof utk PWM speed nanti)
+--------------------------------------------------------------------------------
+
+; REVISI (v3.1): balik ke MOSFET, gantikan relay diskrit di v3.0.
+; Alasan PINDAH LAGI (bukan asal bolak-balik -- ini keputusan sadar
+; setelah membandingkan trade-off, atas permintaan Asad/Agung supaya ada
+; ruang kalau nanti mau modifikasi kecepatan pompa):
+;   (a) MENGHILANGKAN masalah yang sempat jadi TBD di v3.0: rating kontak
+;       relay AC vs DC yang ambigu (lihat catatan lama, sekarang tidak
+;       relevan lagi karena tidak ada kontak mekanis sama sekali).
+;   (b) Solid-state, tidak ada kontak aus/arcing -- relevan kalau pompa
+;       sering nyala-mati (tiap kali user minta air).
+;   (c) FUTURE-PROOF: kalau nanti Agung/dosen ternyata mau kecepatan
+;       pompa bisa diatur (mis. proporsional ke sesuatu), MOSFET tinggal
+;       diganti dari digitalWrite() ke ledcWrite() (PWM) di firmware --
+;       TIDAK PERLU ganti hardware/rewiring. Relay diskrit TIDAK bisa di-
+;       upgrade ke PWM sama sekali (mekanis, cuma ON/OFF, mustahil
+;       dimodulasi cepat tanpa merusak kontak).
+;   (d) Part MOSFET yang dipakai (IRLB8721PbF) SUDAH diverifikasi ke
+;       datasheet resmi Infineon di sesi ini sebelumnya (lihat verifikasi
+;       di akhir file): Vgs(th) 1.35-2.35V (logic-level, nyala penuh di
+;       gate drive 3.3V ESP32), Rds(on) maks 16mOhm @Vgs=4.5V, ID kontinu
+;       62A @Vgs=10V/Tc=25C -- jauh di atas kebutuhan 5A pompa, margin
+;       sangat besar, akan beroperasi dingin (estimasi P=I^2*Rds(on) ~
+;       25*0.016 = 0.4W, tidak perlu heatsink).
+; PENTING -- INI TETAP ON/OFF DI FIRMWARE SEKARANG, BUKAN PWM AKTIF:
+; "future-proof" di sini artinya HARDWARE-nya siap kalau suatu saat
+; dibutuhkan, TAPI firmware v3.1 ini TIDAK menambah logika modulasi
+; kecepatan apa pun -- itu tetap di luar scope sampai ada permintaan
+; konkret dari Agung (jangan diasumsikan sudah termasuk, sama seperti
+; pelajaran dari kasus PID pompa-vs-heater kemarin -- jangan desain
+; berdasarkan "siapa tahu" tanpa konfirmasi eksplisit kalau sudah soal
+; logika kontrol, bukan cuma provisioning hardware).
+;
+; PIN: GPIO26 (sama seperti sebelumnya). ESP32 GPIO bisa langsung drive
+; gate MOSFET logic-level lewat resistor seri, tidak perlu tahap
+; transistor driver terpisah lagi (beda dari relay yang butuh BC337-40
+; sbg driver koil).
+ESP32_DEVKIT [PIN_GPIO26] -> R_GATE (100R) [PIN_1]
+R_GATE [PIN_2] -> Q_PUMP (IRLB8721PbF) [PIN_GATE]
+
+; Pull-down gate WAJIB -- tanpa ini, gate floating (high-Z) saat ESP32
+; boot/reset bisa bikin MOSFET nyala sendiri sesaat sebelum firmware jalan
+; dan set pin ke LOW. Default state MOSFET harus OFF selama kondisi tidak
+; pasti (boot, brown-out, dll).
+Q_PUMP [PIN_GATE]   -> R_GATE_PD (10k) [PIN_1]
+R_GATE_PD [PIN_2] -> NET_GND_BUS
+
+Q_PUMP [PIN_SOURCE] -> NET_GND_BUS
+
+; Logika: ACTIVE-HIGH.
+; GPIO26 = HIGH -> gate MOSFET > Vgs(th) -> MOSFET ON (low Rds(on)) ->
+; pompa ON, air mengalir ke keran.
+; GPIO26 = LOW  -> gate ditarik R_GATE_PD ke GND -> MOSFET OFF -> pompa OFF.
+; GERBANG SUHU MALAM (DIKONFIRMASI dari diskusi, TIDAK BERUBAH dari v3.0):
+; malam hari, pompa TIDAK langsung ON begitu diminta -- tunggu dulu sampai
+; T_tangki capai setpoint (heater kerja duluan menaikkan suhu), baru pompa
+; diizinkan ON. Siang hari air sudah dihangatkan matahari sepanjang hari
+; (thermosiphon), jadi pompa boleh langsung ON begitu diminta tanpa
+; nunggu. Detail logika lengkap di bagian 9.
+
+; === JALUR DAYA POMPA (DC 12V, TIDAK ADA HUBUNGAN DENGAN AC/PLN) ===
+; Low-side switch: pompa+ permanen ke +12V, pompa- di-switch ke GND lewat
+; MOSFET. JANGAN sampai pompa+ juga nyambung langsung ke 12V bus DAN ke
+; drain MOSFET sekaligus (itu bug topologi yang pernah kejadian di draft
+; sebelumnya di proyek ini -- kalau begitu switching-nya kebypass, pompa
+; selalu full-on apa pun state MOSFET).
+NET_12V_BUS (sisi FUSE_PUMP) -> POMPA_DC [PIN_+]
+POMPA_DC [PIN_-] -> Q_PUMP (IRLB8721PbF) [PIN_DRAIN]
+
+; Dioda flyback di terminal pompa -- WAJIB, motor DC = beban induktif,
+; melindungi MOSFET dari back-EMF saat pompa dimatikan. SB1040 (10A/40V
+; Schottky), margin 2x di atas arus pompa 5A -- part & posisi sama persis
+; dengan versi relay sebelumnya, cuma titik sambung di sisi POMPA_DC[-]
+; sekarang ke drain MOSFET, bukan ke kontak NO relay.
+D_PUMP (SB1040, 10A/40V Schottky) [PIN_ANODE]   -> POMPA_DC [PIN_-]
+D_PUMP                             [PIN_CATHODE] -> POMPA_DC [PIN_+]
+
+; CATATAN: kabel fisik (bukan trace PCB) dari terminal blok ke pompa --
+; pakai minimal AWG18 (0.75mm^2) untuk arus 5A, AWG16 kalau kabelnya
+; panjang (>1m). Trace PCB drain-source MOSFET + jalur ke pompa tetap
+; perlu lebar sesuai bagian 8 (arusnya tidak berubah, 5A).
+;
+; DIHAPUS dari v3.0 (tidak relevan lagi krn tidak ada kontak mekanis):
+; Q_PUMPREL (BC337-40), R_PUMPREL_B, D_PUMPREL, RELAY_POMPA (coil+kontak),
+; R_SNUB/C_SNUB (snubber itu utk redam arcing KONTAK relay -- MOSFET
+; tidak punya kontak mekanis, jadi tidak butuh snubber jenis ini).
+
+--------------------------------------------------------------------------------
+4. SSR HEATER — SOLID STATE RELAY (PID time-proportional control)
+--------------------------------------------------------------------------------
+
+; REVISI ARSITEKTUR (v3.0): PID PINDAH KE SINI. PV = suhu tangki (DS18B20
+; #2, GPIO5), MV = duty cycle time-proportional ke SSR (mis. window 1
+; detik: duty 40% = SSR ON 0.4 detik, OFF 0.6 detik, berulang). Alasan
+; SSR bukan relay mekanik: PID switching cepat & berulang terus-menerus
+; akan mengaus kontak relay mekanik dalam waktu singkat -- SSR solid-
+; state (opto-TRIAC internal), tidak ada bagian bergerak, aman di-switch
+; sesering apapun. SSR dipilih atas DIMMER AC (phase-angle control)
+; karena proses termal ini lambat (konstanta waktu menit), granularitas
+; time-proportional 1 detik jauh lebih dari cukup -- dimmer cuma nambah
+; kompleksitas (butuh deteksi zero-cross presisi + timing interrupt) dan
+; risiko EMI/noise ke sensor DS18B20/I2C di board yang sama tanpa manfaat
+; nyata di aplikasi ini.
+;
+; PEMILIHAN SSR: tipe ZERO-CROSS (bukan random-fire/instant-on) --
+; direkomendasikan utk beban resistif seperti elemen pemanas karena
+; switching selalu di titik nol gelombang AC, minim EMI/inrush. Contoh
+; part umum: Fotek SSR-25DA atau sejenis (rating 25A/220V AC output,
+; input kontrol 3-32VDC) -- ASUMSI rating input kontrol part yang
+; benar-benar dibeli, WAJIB dicek datasheet spesifik (lihat catatan
+; verifikasi di akhir file, BELUM diverifikasi ke datasheet resmi di
+; revisi ini). Rating 25A jauh di atas kebutuhan aktual (~2.27A @ 500W/
+; 220V) -- margin besar ("paling robust"), sekaligus rating umum yang
+; gampang dicari & harganya terjangkau di marketplace lokal.
+;
+; SSR modern kebanyakan sudah include optocoupler/isolasi internal di
+; sisi kontrol -- TIDAK perlu transistor driver terpisah seperti relay
+; mekanik (beda dari desain pompa di bagian 3). Cukup GPIO -> resistor
+; seri -> pin kontrol SSR.
+
+; PIN: GPIO27 (sebelumnya dipakai utk relay mekanik heater, sekarang
+; langsung ke SSR -- PWM/time-proportional dari firmware, bukan LEDC
+; hardware PWM, karena periodenya lambat ~1 detik, cukup software timer).
+ESP32_DEVKIT [PIN_GPIO27] -> R_SSR_SIG (220R) [PIN_1]   ; batasi arus ke opto internal SSR
+R_SSR_SIG [PIN_2] -> SSR_HEATER [PIN_CTRL_+]
+NET_GND_BUS -> SSR_HEATER [PIN_CTRL_-]
+
+; Logika: ACTIVE-HIGH (GPIO27=HIGH -> SSR konduksi -> heater dapat daya
+; AC). Digerbang oleh status MALAM dari sensor cahaya BH1750 (bagian 6):
+; PID heater cuma AKTIF (dihitung & dieksekusi) kalau malam TERDETEKSI --
+; siang hari SSR dipaksa OFF terlepas dari hasil PID (siang pemanasan
+; murni dari kolektor pasif). Detail logika lengkap di bagian 9.
+
+; === SISI DAYA AC (220V) — JALUR TERPISAH TOTAL DARI PCB LOGIC/DC ===
+; SSR load-side (output AC) WAJIB dikabel eksternal lewat terminal blok,
+; TIDAK lewat trace tembaga PCB -- sama prinsipnya dengan desain relay
+; sebelumnya. SSR sendiri boleh dipasang di PCB yang sama (isolasi
+; internal opto-TRIAC sudah didesain utk ini, sama seperti relay bare),
+; TAPI SSR untuk beban 500W WAJIB pakai HEATSINK -- SSR TRIAC based
+; punya rugi konduksi (~1-1.5V drop tipikal) yang di 2.27A menghasilkan
+; disipasi panas ~2.5-3.5W terus-menerus saat ON, jauh lebih besar dari
+; MOSFET/relay mekanik, dan TIDAK aman dibiarkan tanpa heatsink untuk
+; beban sebesar ini -- WAJIB ditambahkan ke BOM (lihat bagian 10).
+STEKER_AC [PIN_HOT] -> FUSE_AC (3A) [PIN_A]
+FUSE_AC [PIN_B] -> SSR_HEATER [PIN_LOAD_IN]
+SSR_HEATER [PIN_LOAD_OUT] -> ELEMEN_PEMANAS [PIN_HOT]
+ELEMEN_PEMANAS [PIN_NEUTRAL] -> STEKER_AC [PIN_NEUTRAL]
+
+; === PERINGATAN -- ELEMEN PEMANAS YANG DIBELI TIDAK DIRANCANG UNTUK
+; INSTALASI TETAP TERCELUP, INI PERLU DIDISKUSIKAN, BUKAN CUMA DICATAT ===
+; Produk yang dibeli client: "elemen celup" konsumen 500W/220V, ukuran fisik
+; cuma 16 x 3.5 x 1.5 cm, warna pink, bodi plastik+elemen besi -- ini jenis
+; pencelup cepat-didih untuk gelas/teko/panci RUMAH TANGGA (dipegang tangan,
+; dicelup sebentar, dicabut lagi), BUKAN elemen tubular/tangki yang memang
+; didesain untuk instalasi permanen tercelup terus-menerus di tangki SWH.
+; Ada 2 isu teknis nyata yang HARUS didiskusikan ke Agung/dosen pembimbing
+; sebelum lanjut, bukan sekadar diasumsikan aman:
+;   1. LABEL PRODUK SENDIRI bilang "Hindari mencelupkan gagang pegangan
+;      tangan dari alat ini kedalam air" -- artinya cuma ujung elemen yang
+;      boleh basah, sisi gagang/kabel WAJIB tetap kering. Untuk instalasi
+;      tetap di tangki (bukan dipegang tangan), ini berarti perlu BRACKET/
+;      DUDUKAN MEKANIK yang menahan elemen di posisi tetap dengan gagang
+;      selalu di atas permukaan air -- ini kerjaan mekanik/rangka, di luar
+;      scope PCB+firmware Asad, tapi WAJIB disampaikan ke Agung karena kalau
+;      salah pasang (gagang ikut tercelup atau bergeser turun), risiko
+;      korslet/sengatan listrik nyata.
+;   2. TIDAK ADA INFORMASI proteksi dry-fire/thermal cutoff di deskripsi
+;      produk (beda dengan elemen tubular water heater tangki yang biasanya
+;      punya thermal fuse bawaan). Kalau SSR ON tapi permukaan air di
+;      tangki turun di bawah elemen (kebocoran, evaporasi) -- elemen
+;      konsumen seperti ini punya risiko overheat/rusak/kebakaran lebih
+;      tinggi dibanding elemen tubular yang memang dirancang untuk
+;      submerged permanent duty.
+; REKOMENDASI (opsional, di luar scope asli tapi masuk akal ditambahkan ke
+; firmware+wiring karena keduanya memang bagian kerjaan Asad): tambah SATU
+; interlock keselamatan level-air (float switch sederhana, 2 kabel, NO/NC)
+; yang dipasang di titik tinggi minimum aman elemen -- firmware paksa
+; GPIO27=LOW (heater OFF paksa, terlepas dari status PID) kalau float
+; switch mendeteksi air di bawah ambang. Ini TIDAK ada di netlist versi
+; ini (belum dikonfirmasi client mau atau tidak) -- SAMPAIKAN opsi ini ke
+; Agung sebagai rekomendasi keselamatan, bukan langsung ditambahkan
+; sepihak, karena menambah 1 pin digital + 1 komponen BOM + logika
+; firmware baru.
+
+--------------------------------------------------------------------------------
+5. DS18B20 x2 (SENSOR SUHU KOLEKTOR & TANGKI)
+--------------------------------------------------------------------------------
+
+; REVISI (v3.0): PV (process variable) untuk loop PID SEKARANG DI HEATER
+; (bukan pompa lagi, lihat bagian 3&4) = SENSOR TANGKI. Sensor kolektor
+; (dipasang di ujung output kolektor, sesuai proposal asli) sekarang
+; statusnya MONITORING/LOGGING saja (tampilan LCD + data analisis
+; "pengaruh cuaca" di bab hasil skripsi) -- BUKAN bagian hitungan PID,
+; karena aktuator yang dulu dia kontrol (sirkulasi kolektor) sudah tidak
+; ada (jalur itu sekarang pasif/thermosiphon). Interlock lama "pompa OFF
+; kalau T_kolektor<=T_tangki" juga SUDAH TIDAK RELEVAN dan dihapus dari
+; firmware notes (bagian 9) -- pompa sekarang cuma soal distribusi,
+; gerbangnya beda (lihat bagian 9).
+
+; PIN GANTI dari D2/D3 (Mega) -> GPIO4/GPIO5 (ESP32). RAIL PULL-UP GANTI
+; dari NET_5V_LOGIC -> NET_3V3_LOGIC (WAJIB -- DS18B20 sendiri toleran 3.3V
+; atau 5V, tapi pull-up-nya HARUS ikut rail yang sama dengan level logic
+; ESP32, supaya tegangan HIGH di pin data = 3.3V, bukan 5V yang bisa
+; merusak GPIO).
+
+; --- Sensor kolektor (DS18B20 #1) ---
+NET_3V3_LOGIC -> DS18B20_1 [PIN_VCC]
+NET_GND_BUS   -> DS18B20_1 [PIN_GND]
+ESP32_DEVKIT [PIN_GPIO4] -> DS18B20_1 [PIN_DATA]
+NET_3V3_LOGIC -> R_DS1_PU (4k7) [PIN_1]
+R_DS1_PU [PIN_2] -> ESP32_DEVKIT [PIN_GPIO4]   ; pull-up OneWire, WAJIB, ke 3.3V
+
+; --- Sensor tangki (DS18B20 #2) — INI YANG JADI PV UNTUK PID ---
+NET_3V3_LOGIC -> DS18B20_2 [PIN_VCC]
+NET_GND_BUS   -> DS18B20_2 [PIN_GND]
+ESP32_DEVKIT [PIN_GPIO5] -> DS18B20_2 [PIN_DATA]
+NET_3V3_LOGIC -> R_DS2_PU (4k7) [PIN_1]
+R_DS2_PU [PIN_2] -> ESP32_DEVKIT [PIN_GPIO5]   ; pull-up OneWire, WAJIB, ke 3.3V
+
+; Dua sensor dipasang di OneWire bus TERPISAH (GPIO4, GPIO5) -- bukan satu
+; bus bersama. Lebih boros 1 pin, tapi lebih simpel di firmware (tidak
+; perlu scan ROM address 64-bit tiap sensor), dan lebih gampang di-debug
+; kalau salah satu sensor bermasalah. GPIO4/5 dipilih karena aman dari
+; strapping pin (hindari GPIO0/2/12/15) dan bukan pin flash internal
+; (hindari GPIO6-11).
+
+; DIKONFIRMASI dari client: kedua sensor TERCELUP LANGSUNG di air (bukan
+; ditempel di luar pipa). Konsekuensi mekanik/instalasi (di luar scope
+; PCB, tapi penting buat firmware & pemilihan part):
+;   - WAJIB pakai probe DS18B20 waterproof (ujung stainless steel yang
+;     sudah di-epoxy/potting pabrik) -- bukan chip DS18B20 telanjang TO-92.
+;   - Titik masuk kabel probe ke dinding tangki/kolektor WAJIB pakai cable
+;     gland/grommet kedap air (proposal asli sudah sebut lubang 15mm di
+;     tangki yang bisa dipakai untuk ini -- pastikan disegel, bukan cuma
+;     dilubangi polos, supaya air tidak rembes ke kabel/elektronik).
+;   - Panjang kabel probe ke PCB bisa cukup jauh (tangki/kolektor di luar,
+;     box kontrol biasanya di dalam/terlindung) -- pull-up 4k7 di bagian
+;     ini sudah cukup untuk kabel sampai beberapa meter; kalau instalasi
+;     akhir ternyata >5m, pertimbangkan turunkan nilai pull-up (mis. 3k3)
+;     atau tambah kapasitor kecil (~100pF) di pin data dekat Arduino untuk
+;     redam noise pada bus OneWire yang panjang.
+
+--------------------------------------------------------------------------------
+6. LCD 20x4 I2C + SENSOR CAHAYA (STATUS LOKAL & DETEKSI MALAM)
+--------------------------------------------------------------------------------
+
+; DIKONFIRMASI: LCD karakter (kristal/HD44780-type) dengan backpack I2C
+; -- sesuai yang sudah dipakai di proposal asli, tidak diganti.
+; BARU (v2.0): tambah sensor cahaya BH1750 (I2C digital lux meter) untuk
+; deteksi malam/siang, atas permintaan client.
+; REVISI (v3.1) -- INPUT SETPOINT PINDAH DARI ENCODER FISIK KE WEB/WEBSOCKET:
+; atas keputusan client, rotary encoder + push button DIHAPUS dari hardware.
+; Setpoint sekarang di-set lewat halaman web sederhana yang di-hosting
+; LANGSUNG oleh ESP32 sendiri (WiFi sudah onboard, TIDAK perlu modul/
+; komponen tambahan) -- ESP32 jalan sbg WiFi AP atau connect ke WiFi
+; rumah (STA mode), serve 1 halaman HTML + WebSocket, browser HP kirim
+; nilai setpoint baru real-time lewat WebSocket. LCD TETAP ADA untuk baca
+; status lokal (suhu, setpoint aktif, status heater/pompa) tanpa perlu
+; buka HP -- ini KONFIRMASI EKSPLISIT dari diskusi: "khusus buat demo
+; dulu", jadi desain ini SENGAJA tidak pakai cloud/app pihak ketiga
+; (Blynk/ThingSpeak dkk) supaya tidak ada dependency internet -- cukup
+; WiFi lokal antara HP dan ESP32, lebih predictable buat demo sidang
+; (lihat diskusi risiko availability sebelumnya). KONSEKUENSI BOM: hapus
+; ENCODER + R_ENC_CLK/R_ENC_DT (kalau bare) dari daftar beli -- 2 GPIO
+; (25, 32, 33 -- 3 pin) jadi bebas, bisa dipakai lain kalau perlu nanti.
+; CATATAN: ini scope tambahan di luar apa yang disebut proposal tertulis
+; (yang sama sekali tidak menyebut web/IoT) -- sama seperti heater,
+; idealnya disebutkan juga ke dosen pembimbing sbg fitur tambahan,
+; walau risikonya lebih rendah drpd isu PID krn ini cuma nambah HMI,
+; tidak mengubah klaim kontrol inti skripsi.
+
+; === LCD I2C — WAJIB LEWAT LEVEL SHIFTER (konsekuensi ganti ke ESP32) ===
+; LCD backpack (PCF8574) UMUMNYA punya pull-up SDA/SCL onboard yang narik
+; ke VCC-nya sendiri. Kalau LCD di-supply 5V (biar backlight terang &
+; kontras normal sesuai spek LCD kebanyakan), pull-up itu akan menarik
+; SDA/SCL ke ~5V -- itu MELEBIHI batas aman GPIO ESP32 (3.3V, tidak
+; toleran 5V). INI BUKAN OPSIONAL, WAJIB ADA SALAH SATU dari solusi ini:
+;   (a) Level shifter I2C bidirectional aktif (mis. modul breakout
+;       berbasis BSS138, atau 2x MOSFET BSS138 diskrit + 4 resistor
+;       pull-up dirakit sendiri di PCB kalau mau konsisten dengan gaya
+;       "driver diskrit sendiri" di proyek ini) di antara ESP32 (sisi
+;       3.3V) dan LCD backpack (sisi 5V) -- REKOMENDASI Asad, paling
+;       robust & tidak korbankan brightness/kontras LCD.
+;   (b) LCD backpack di-supply 3.3V (bukan 5V) -- lebih sederhana/murah
+;       (tidak perlu part tambahan) TAPI backlight jadi lebih redup dan
+;       kontras mungkin perlu di-trim ulang potentiometer-nya, dan tidak
+;       semua backpack PCF8574 dijamin beroperasi normal di 3.3V (banyak
+;       yang toleransi turun ke 2.5V, tapi VERIFIKASI ke part yang benar-
+;       benar dibeli, bukan diasumsikan).
+; !! KOREKSI PENTING (BUKAN OPSI): resistor divider/resistor seri BIASA
+; TIDAK BISA dipakai sbg pengganti (a) di atas. I2C itu bus open-drain
+; DUA ARAH (ESP32 dan LCD sama-sama bisa narik SDA/SCL ke LOW), sedangkan
+; resistor divider cuma benar utk sinyal SATU ARAH (mis. UART TX 5V ->
+; RX 3.3V, atau baca sensor analog). Kalau dipaksa pakai divider di bus
+; I2C: ESP32 tidak bisa menarik LOW dgn valid ke sisi 5V (tegangan yg
+; sampai ke sisi 5V pas ESP32 coba LOW tergantung rasio R1/R2, biasanya
+; tidak cukup rendah utk dianggap valid LOW oleh chip 5V), jadi write
+; dari ESP32 ke LCD bisa gagal random -- BUKAN solusi yg reliable utk
+; sesuatu yg harus dipertanggungjawabkan di sidang. Trik "1 resistor seri
+; saja" (tanpa divider, cuma limiting) kadang dipakai hobbyist krn
+; kelihatan "jalan", tapi itu mengandalkan clamp diode internal GPIO
+; ESP32 menyerap arus lebih dari spek resmi Espressif -- di luar spek,
+; berisiko random fail, TIDAK direkomendasikan. Solusi hemat part yg
+; TETAP benar secara elektris: opsi (a) di atas versi diskrit (2x BSS138
+; + resistor), bukan resistor polos.
+; Netlist ini pakai opsi (a) sebagai desain utama.
+
+NET_5V_LOGIC -> LCD_I2C [PIN_VCC]
+NET_GND_BUS  -> LCD_I2C [PIN_GND]
+LCD_I2C [PIN_SDA] -> LVL_SHIFT [PIN_HV_SDA]
+LCD_I2C [PIN_SCL] -> LVL_SHIFT [PIN_HV_SCL]
+NET_5V_LOGIC  -> LVL_SHIFT [PIN_HV]
+NET_3V3_LOGIC -> LVL_SHIFT [PIN_LV]
+NET_GND_BUS   -> LVL_SHIFT [PIN_GND]
+LVL_SHIFT [PIN_LV_SDA] -> ESP32_DEVKIT [PIN_GPIO21_SDA]
+LVL_SHIFT [PIN_LV_SCL] -> ESP32_DEVKIT [PIN_GPIO22_SCL]
+C_LCD_CER (100nF) [PIN_1] -> LCD_I2C [PIN_VCC]
+C_LCD_CER          [PIN_2] -> NET_GND_BUS
+; Alamat I2C backpack ASUMSI 0x27 -- cek dengan I2C scanner, bisa juga 0x3F.
+
+; === SENSOR CAHAYA BH1750 (BARU, I2C, share bus SAMA dengan LCD) ===
+; BH1750 beroperasi native 3.3V-5V, output digital I2C -- DIPILIH
+; dibanding LDR analog karena lebih presisi (lux terukur, bukan tegangan
+; mentah yang perlu kalibrasi manual per unit LDR) dan lebih mudah di-
+; threshold di firmware (mis. "malam" kalau <10 lux). Dipasang di SISI
+; 3.3V (bukan lewat level shifter) karena beroperasi native 3.3V, TIDAK
+; perlu ikut LCD ke sisi 5V.
+NET_3V3_LOGIC -> BH1750 [PIN_VCC]
+NET_GND_BUS   -> BH1750 [PIN_GND]
+ESP32_DEVKIT [PIN_GPIO21_SDA] -> BH1750 [PIN_SDA]   ; share bus I2C 3.3V
+ESP32_DEVKIT [PIN_GPIO22_SCL] -> BH1750 [PIN_SCL]   ; (beda address dgn LCD:
+                                                       ; BH1750 default 0x23,
+                                                       ; LCD 0x27 -- tidak
+                                                       ; bentrok)
+BH1750 [PIN_ADDR] -> NET_GND_BUS   ; pin ADDR ke GND -> address 0x23
+
+; DIHAPUS di v3.1: rotary encoder + push button (GPIO25/32/33 dari versi
+; sebelumnya). Setpoint sekarang lewat WiFi web/WebSocket yang di-hosting
+; ESP32 sendiri -- lihat catatan di atas. GPIO25/32/33 sekarang BEBAS
+; (tidak dipakai apa pun di netlist ini), bisa dicadangkan utk kebutuhan
+; lain (mis. kalau mekanisme pemicu pompa -- lihat TBD -- ternyata perlu
+; 1 GPIO tambahan buat tombol/flow switch fisik).
+
+--------------------------------------------------------------------------------
+7. RINGKASAN PIN ESP32 DEVKIT (FINAL, v3.1)
+--------------------------------------------------------------------------------
+
+  GPIO4       -> R_DS1_PU (pull-up 4k7 ke 3.3V) -> DS18B20_1 DATA [SENSOR KOLEKTOR]
+  GPIO5       -> R_DS2_PU (pull-up 4k7 ke 3.3V) -> DS18B20_2 DATA [SENSOR TANGKI, PV PID]
+  GPIO27      -> R_SSR_SIG (220R) -> SSR_HEATER ctrl            [HEATER, active-HIGH, PID time-proportional]
+  GPIO26      -> R_GATE (100R) -> Q_PUMP (IRLB8721) gate        [POMPA MOSFET ON/OFF, active-HIGH, future-proof PWM]
+  GPIO25/32/33-> BEBAS (encoder dihapus v3.1, cadangan utk GPIO pemicu pompa kalau perlu -- lihat TBD)
+  GPIO21(SDA) -> LVL_SHIFT -> LCD_I2C SDA, langsung -> BH1750 SDA [LCD + SENSOR CAHAYA]
+  GPIO22(SCL) -> LVL_SHIFT -> LCD_I2C SCL, langsung -> BH1750 SCL [LCD + SENSOR CAHAYA]
+  5V/VIN      -> NET_7V_ESP (dari BUCK_ESP, 12V->7V, margin reliabilitas WiFi -- lihat bagian 2)
+  GND         -> NET_GND_BUS
+  (3V3 pin devkit TIDAK dipakai sbg sumber eksternal -- lihat catatan bag.2)
+
+  PIN DIHINDARI (jangan dipakai utk apapun): GPIO0/2/12/15 (strapping,
+  ganggu proses boot kalau ada beban/pull di pin ini saat power-on),
+  GPIO6-11 (terpakai internal utk flash SPI, tidak bisa dipakai),
+  GPIO34-39 (input-only, tidak ada pull-up/down internal, tidak bisa
+  dipakai utk output/PWM/relay -- oke dipakai kalau nanti ada kebutuhan
+  input tambahan seperti float switch level-air yang direkomendasikan
+  di bagian 5).
+
+--------------------------------------------------------------------------------
+8. CATATAN PENTING PCB LAYOUT
+--------------------------------------------------------------------------------
+
+LEBAR TRACE (minimum, estimasi, 1oz copper, ~10 C rise -- pompa DIKONFIRMASI
+5A):
+  NET_12V_BUS (sebelum fuse cabang)  : 2mm  (harus tanggung ~5.5A total)
+  Jalur pompa (setelah FUSE_PUMP)    : 1.8mm (5A)
+  NET_7V_ESP (BARU v3.1)             : 0.4mm (beban kecil, cuma ESP32 devkit)
+  NET_5V_LOGIC (skrg cuma LCD+input LDO)  : 0.4mm
+  NET_3V3_LOGIC                      : 0.4mm (beban kecil, sensor+BH1750+LV shifter)
+  Sinyal (SDA/SCL/GPIO4/5/26/27)     : 0.3mm
+
+; CATATAN BARU: jalur dari BATERAI ke FUSE_MAIN (sebelum masuk PCB) tetap
+; pakai KABEL, bukan trace PCB -- baterai dan charge controller/panel
+; letaknya di luar PCB kontrol (biasanya di dekat panel/box baterai
+; terpisah), cuma titik masuk 12V yang menyentuh PCB lewat terminal blok.
+
+; Kalau board yang dipakai 1oz copper dan lebar 1.8-2mm untuk jalur
+; pompa terasa terlalu lebar/tidak muat di layout, opsi lain: minta fab
+; PCB pakai 2oz copper (lebar trace bisa dikira-kira setengahnya untuk
+; kenaikan suhu yang sama), atau jalur pompa TIDAK lewat trace PCB sama
+; sekali -- pompa langsung dikabel dari terminal blok lewat drain MOSFET
+; ke pompa dengan kabel AWG18 (lihat catatan bagian 3), PCB cuma
+; menyalurkan sisi gate (arus kecil) saja. Opsi kedua ini yang lebih
+; umum dipakai untuk board hobbyist/skripsi karena tidak perlu pesan fab
+; dengan copper lebih tebal.
+
+GROUND PLANE:
+  - Copper pour GND di layer bawah
+  - Star ground: satukan semua GND di SATU titik dekat terminal negatif
+    BATERAI (dulu "PSU" -- sekarang sumbernya baterai 12V dari sistem
+    panel surya, titik referensi ground-nya sama prinsipnya)
+  - Kabel sensor DS18B20 (terutama yang ke kolektor, sering kabelnya panjang
+    kalau kolektor jauh dari box kontrol) jangan lewat dekat jalur pompa/MOSFET
+  - Charge controller MPPT biasanya punya ground sendiri dari sisi panel --
+    pastikan cuma ADA SATU titik sambung ke ground sistem PCB (di titik
+    negatif baterai), jangan bikin ground loop dengan menyambung ground
+    panel/charge controller ke PCB di titik lain juga
+
+ZONA AC 220V:
+  - SSR_HEATER boleh nempel di PCB yang sama (isolasi opto-TRIAC internal
+    sudah didesain utk ini), TAPI wiring AC dari steker dan ke elemen
+    pemanas WAJIB lewat terminal blok, TIDAK lewat trace PCB
+  - SSR_HEATER WAJIB pakai heatsink (lihat bagian 4 & BOM) -- beri ruang
+    di layout utk heatsink + sirkulasi udara, jangan padatkan komponen
+    lain persis di sebelahnya
+  - Beri jarak fisik minimum antara footprint SSR dan komponen logic
+    lain di sekitarnya -- jangan taruh apapun persis di sisi kontak/load
+  - FUSE_AC dan terminal blok AC ditaruh di tepi PCB, gampang dijangkau
+    dan gampang diganti kalau fuse putus
+
+ZONA MOSFET POMPA (DC, drain-source menanggung 5A -- lihat catatan
+bagian 3):
+  - Q_PUMP (IRLB8721) ditaruh dengan trace drain/source selebar jalur
+    pompa di bagian 8 (1.8-2mm), BUKAN selebar trace sinyal biasa
+  - Trace gate (R_GATE ke pin gate) boleh sinyal biasa (0.3mm), pendek
+    dan langsung -- hindari rute gate panjang/berkelok yang bisa
+    menangkap noise dan memicu switching liar
+  - Meskipun estimasi disipasi kecil (~0.4W, lihat bagian 3), sediakan
+    sedikit copper pour di sekitar tab/drain MOSFET sebagai heatsink pasif
+    -- praktik baik walau tidak wajib di beban 5A ini
+
+PENEMPATAN KOMPONEN:
+  - Kedua buck converter (BUCK_ESP, BUCK_LCD) & LDO 3V3 di tepi PCB, ada sirkulasi udara
+  - Kapasitor decoupling 100nF sedekat mungkin ke pin VCC tiap modul
+  - SSR_HEATER dan Q_PUMP (MOSFET, yang membawa arus lebih besar/panas)
+    dijauhkan sedikit dari ESP32 devkit dan sensor
+  - Level shifter I2C ditaruh dekat konektor LCD (sisi 5V-nya menghadap
+    LCD, sisi 3.3V-nya menghadap ESP32) supaya jalur 5V tidak menjalar
+    jauh di board
+  - Mounting hole untuk pemasangan ke box/chassis kontrol
+  - Silkscreen label jelas tiap konektor eksternal (bukan cuma "J1"/"J2"
+    -- tulis "SENSOR TANGKI", "POMPA", "AC IN", "HEATER OUT", "BATERAI IN",
+    dst)
+  - Charge controller MPPT & baterai TIDAK di PCB ini -- part terpisah,
+    ditaruh di box/enclosure sendiri dekat panel surya/baterai, PCB
+    kontrol cuma terima 12V dari situ lewat terminal blok + kabel
+
+--------------------------------------------------------------------------------
+9. CATATAN FIRMWARE
+--------------------------------------------------------------------------------
+
+  REVISI TOTAL (v3.0) -- PID PINDAH KE HEATER, lihat catatan versi 3.0
+  poin 0 di awal file untuk alasan lengkapnya (thermosiphon pasif +
+  pompa cuma distribusi).
+
+  - PID SEKARANG DI HEATER, bukan pompa. PV = suhu TANGKI (GPIO5). Output
+    PID (0-100%) dikonversi jadi duty cycle time-proportional ke SSR:
+      window = 1000 ms (ASUMSI awal, bisa disesuaikan hasil tuning)
+      t_on   = (Output_PID / 100.0) * window
+      SSR = HIGH selama t_on ms tiap window, LOW sisanya
+    PID cuma DIHITUNG & DIEKSEKUSI kalau is_night == true (lihat gerbang
+    siang/malam di bawah) -- siang hari SSR dipaksa LOW terlepas dari
+    hasil PID, karena pemanasan siang murni dari kolektor pasif
+    (thermosiphon), bukan tugas heater.
+  - GERBANG SIANG/MALAM (dari sensor cahaya BH1750, bagian 6):
+      is_night = lux_BH1750 < AMBANG_LUX   ; ASUMSI ambang ~10 lux, WAJIB
+                                             ; dikalibrasi di lokasi asli
+    Siang (is_night==false): SSR heater dipaksa LOW, PID heater di-reset
+    (integrator dikosongkan) supaya tidak ada windup menumpuk dari siang
+    hari yang tiba-tiba nongol pas malam mulai.
+  - ANTI-WINDUP: integrator PID heater berhenti akumulasi saat output
+    saturasi di 0% atau 100%, DAN direset tiap kali transisi siang->malam
+    (lihat poin di atas).
+  - SENSOR KOLEKTOR (GPIO4): dibaca tiap siklus loop, ditampilkan LCD +
+    dicatat/logged (kalau ada logging ke SD/serial) untuk data analisis
+    "pengaruh cuaca terhadap kinerja" di bab hasil skripsi -- TIDAK masuk
+    ke perhitungan PID atau kondisi apa pun (murni instrumentasi).
+  - POMPA (MOSFET ON/OFF, GPIO26, active-HIGH -- lihat bagian 3): dipicu
+    oleh permintaan user (mis. tombol/switch "ambil air" -- MEKANISME
+    PEMICU INI BELUM DIKONFIRMASI, lihat TBD) dengan gerbang suhu:
+      Siang (is_night==false): pompa ON langsung begitu diminta (air
+      sudah dihangatkan matahari sepanjang hari via thermosiphon).
+      Malam (is_night==true): pompa TIDAK langsung ON. Firmware tunggu
+      sampai T_tangki >= setpoint (heater sudah bekerja menaikkan suhu),
+      BARU pompa diizinkan ON. Selama menunggu, LCD idealnya tampilkan
+      status "memanaskan..." supaya user tahu kenapa air belum keluar.
+      TIMEOUT (BARU, disarankan): kasih batas waktu tunggu maksimum (mis.
+      10-15 menit ASUMSI, WAJIB disesuaikan hasil tuning PID riil) --
+      kalau heater tidak berhasil capai setpoint dalam waktu itu (elemen
+      rusak, air terlalu dingin, dll), pompa tetap diizinkan ON dengan
+      suhu apa adanya + LCD tampilkan peringatan, supaya user tidak
+      terjebak menunggu tanpa batas kalau ada masalah hardware.
+  - CATATAN v3.1 -- FIRMWARE POMPA TETAP ON/OFF (digitalWrite), BUKAN
+    PWM: hardware GPIO26 sekarang di gate MOSFET (bukan lagi basis
+    transistor driver relay), yang secara fisik SIAP dipakai PWM
+    (ledcAttachPin/ledcWrite) kalau suatu saat dibutuhkan kecepatan
+    variabel. TAPI firmware v3.1 ini sengaja TIDAK menambah logika PWM
+    apa pun -- itu tetap di luar scope sampai ada permintaan konkret dari
+    Agung. Jangan tambahkan modulasi kecepatan pompa sendiri tanpa
+    konfirmasi eksplisit.
+  - SETPOINT (BARU v3.1, ganti dari encoder): ESP32 host web server +
+    WebSocket sendiri (WiFi AP mode ATAU STA connect ke WiFi rumah --
+    WAJIB dipilih & dikonfirmasi, lihat TBD). Halaman web sederhana (1
+    halaman HTML, bisa disimpan sbg PROGMEM/SPIFFS di firmware, TIDAK
+    perlu hosting eksternal) kirim nilai setpoint baru real-time lewat
+    WebSocket begitu user ubah. Validasi range setpoint tetap WAJIB di
+    firmware (mis. clamp ke rentang suhu aman, mis. 30-70C ASUMSI --
+    jangan percaya input browser mentah-mentah).
+  - LCD menampilkan: suhu tangki (PV), suhu kolektor (monitoring), setpoint
+    aktif, status heater (ON/OFF + malam/siang dari BH1750), status pompa
+    (ON/OFF/menunggu-panas), dan idealnya level baterai (lihat TBD -- perlu
+    sensor tegangan baterai tambahan kalau mau ditampilkan, belum ada di
+    netlist ini).
+
+--------------------------------------------------------------------------------
+10. BILL OF MATERIALS
+--------------------------------------------------------------------------------
+
+=== KOMPONEN PROTEKSI & PASIF ===
+
+NO  | REFDES         | KOMPONEN          | NILAI/TIPE           | QTY
+----|-----------------|-------------------|------------------------|----
+1   | R_SSR_SIG       | Resistor          | 220 ohm 1/4W (seri ke pin kontrol SSR heater) | 1
+2   | R_GATE          | Resistor          | 100 ohm 1/4W (seri ke gate MOSFET pompa) | 1
+3   | R_GATE_PD       | Resistor          | 10k ohm 1/4W (pull-down gate-source MOSFET pompa, WAJIB) | 1
+4   | R_DS1_PU        | Resistor          | 4.7k ohm 1/4W          | 1
+5   | R_DS2_PU        | Resistor          | 4.7k ohm 1/4W          | 1
+6   | Q_PUMP          | MOSFET N-channel  | IRLB8721PbF (logic-level, driver pompa, lihat bagian 3) | 1
+7   | D_PUMP          | Dioda Schottky    | SB1040 (10A/40V, flyback terminal pompa) | 1
+8   | D_REVPOL        | Dioda Schottky    | SB1040 (10A/40V)       | 1
+9   | TVS_12V         | TVS Diode (unidirectional, WAJIB perhatikan polaritas) | SMBJ18A, standoff 18V/clamp maks 29.2V (opsional) | 1
+10  | C_12V_BULK      | Kapasitor Elko    | 1000uF/25V             | 1
+11  | C_12V_CER       | Kapasitor Ceramic | 100nF/50V              | 1
+12  | C_LOG_ELCO      | Kapasitor Elko    | 470uF/16V              | 1
+13  | C_LOG_CER       | Kapasitor Ceramic | 100nF/50V              | 1
+14  | C_ESP_ELCO      | Kapasitor Elko    | 100uF/16V              | 1
+15  | C_LCD_CER       | Kapasitor Ceramic | 100nF/50V              | 1
+16  | C_LDO_IN        | Kapasitor Ceramic | 100nF (LDO 3V3 input)  | 1
+17  | C_LDO_OUT       | Kapasitor Tantalum/Ceramic | 10uF (LDO 3V3 output) | 1
+18  | FUSE_MAIN       | Fuse (holder)     | 8A slow-blow           | 1
+19  | FUSE_PUMP       | Fuse (holder)     | 7A                     | 1
+20  | FUSE_BUCK       | Fuse (holder)     | 1A                     | 1
+21  | FUSE_AC         | Fuse (holder)     | 3A (jalur AC 220V, 500W/220V=2.27A, margin ~1.3x) | 1
+
+; CATATAN: D_PUMP dan D_REVPOL sama-sama SB1040 (10A/40V) tapi FUNGSI beda
+; -- D_PUMP flyback di terminal pompa (proteksi back-EMF motor DC saat
+; MOSFET switching), D_REVPOL proteksi polaritas jalur masuk baterai. Boleh
+; pakai part number sama untuk sederhanakan BOM (beli 2x part yang sama).
+
+; DIHAPUS di v3.1 (relay diskrit pompa dari v3.0 digantikan MOSFET, lihat
+; bagian 3): R_PUMPREL_B, Q_PUMPREL(BC337-40), D_PUMPREL(1N4148),
+; R_SNUB/C_SNUB (snubber itu utk kontak relay, MOSFET tidak butuh).
+
+=== KOMPONEN UTAMA ===
+
+NO  | KOMPONEN               | SPESIFIKASI                                | QTY
+----|-------------------------|-----------------------------------------------|----
+1   | ESP32 DevKit            | -- | 1
+2   | Pompa DC                | 12V/5A DIKONFIRMASI (bukan diaphragm kecil -- perlakukan sbg beban utama) | 1
+3   | SSR heater (BARU di v3.0, ganti relay mekanik) | Zero-cross, output >=10A/220VAC (rating umum 25A, margin besar dari kebutuhan 2.27A), input kontrol 3-32VDC ASUMSI -- lihat bagian 4 & catatan verifikasi | 1
+4   | Heatsink SSR (WAJIB)| ukuran sesuai casing SSR (umumnya sudah ada bracket mounting bawaan SSR industrial-style), utk disipasi ~2.5-3.5W terus-menerus | 1
+5   | Elemen pemanas          | AC 220V/500W DIKONFIRMASI (elemen celup konsumen -- lihat catatan bag.4 soal bracket & dry-fire) | 1
+6   | DS18B20 waterproof probe | --                                             | 2
+7   | LCD 20x4 karakter + I2C backpack | alamat 0x27/0x3F (cek scanner)         | 1
+8   | Buck converter (BUCK_ESP) | IN:12V OUT:7V (di-set), min 1A, mis. XL4015 -- khusus suplai ESP32, margin reliabilitas WiFi (lihat bagian 2) | 1
+9   | Buck converter (BUCK_LCD) | IN:12V OUT:5V (di-set), min 1A, mis. XL4015 -- khusus suplai LCD | 1
+10  | LDO 3.3V                | AMS1117-3.3 atau MCP1700-3.3, >=500mA          | 1
+11  | Level shifter I2C       | bidirectional, mis. modul BSS138 4-channel, ATAU 2x BSS138 diskrit + resistor (lihat bagian 6, BUKAN resistor polos) | 1
+12  | Sensor cahaya BH1750    | modul breakout I2C, digital lux                | 1
+
+; DIHAPUS di v3.1: Rotary encoder + SW (KY-040) -- setpoint pindah ke
+; web/WebSocket yang di-hosting ESP32 sendiri (lihat bagian 6 & 9).
+
+=== SISTEM PANEL SURYA (BARU, v2.0 -- menggantikan PSU/adaptor AC-DC) ===
+
+NO  | KOMPONEN         | SPESIFIKASI                                        | QTY
+----|-------------------|-----------------------------------------------------|----
+1   | Panel surya       | 200 Wp, mono/polycrystalline (lihat perhitungan bag.1) | 1
+2   | Charge controller | MPPT 12V/24V-auto, >=20A, WAJIB support profil charging sesuai baterai yang dipilih (lead-acid ATAU lithium) | 1
+3   | Baterai           | PILIH SALAH SATU: 12V/100Ah lead-acid/AGM deep-cycle, ATAU 12.8V/55-60Ah LiFePO4 (lihat trade-off di bagian 1) | 1
+
+=== POWER & MEKANIKAL ===
+
+NO  | KOMPONEN         | SPESIFIKASI                    | QTY
+----|-------------------|-----------------------------------|----
+1   | Saklar rocker/toggle | on/off utama, rating >=4A       | 1
+2   | Terminal blok screw | sensor x2, pompa, AC in/out, baterai in, dll | ~7
+3   | Fuse holder        | sesuai kebutuhan (lihat tabel di atas) | 4
+4   | Kabel panel-ke-charge-controller & charge-controller-ke-baterai | ukuran sesuai arus panel (~11A) & jarak, WAJIB dihitung terpisah (di luar scope PCB, tapi bagian dari instalasi listrik sistem) | secukupnya
+
+--------------------------------------------------------------------------------
+SUDAH DIKONFIRMASI (revisi terbaru, sebelumnya TBD)
+--------------------------------------------------------------------------------
+  - Arus/watt pompa DC: 12V/5A (60W), DIKONFIRMASI langsung dari client.
+    Seluruh proteksi (PSU, FUSE_MAIN, FUSE_PUMP, D_PUMP, D_REVPOL, lebar
+    trace) di netlist ini SUDAH direvisi mengikuti angka ini -- lihat
+    bagian 1, 3, dan 8.
+  - Elemen pemanas: AC 220V/500W, DIKONFIRMASI dari produk yang sudah
+    dibeli client (elemen celup konsumen, bukan tubular tangki -- lihat
+    catatan penting di bagian 4 soal bracket mekanik & proteksi dry-fire,
+    ini BELUM final, masih perlu didiskusikan ke Agung).
+  - MCU: DIKONFIRMASI ganti Arduino Mega 2560 -> ESP32 DevKit, atas
+    permintaan client -- seluruh pin mapping (bagian 3,4,5,6,7) dan
+    firmware notes (bagian 9) SUDAH direvisi ke pin & level logic 3.3V
+    ESP32.
+  - Catu daya rail 12V DC (pompa+logic): DIKONFIRMASI ganti dari adaptor
+    AC-DC ke panel surya+charge controller+baterai, atas permintaan
+    client. Elemen pemanas 500W TETAP di jalur PLN terpisah (rekomendasi
+    Asad, lihat catatan versi 2.0 di awal file dan diskusi di bagian 1).
+  - Sensor cahaya: DIKONFIRMASI tambah BH1750 (I2C) untuk deteksi malam,
+    atas permintaan client -- menggerbang logika ON/OFF heater backup
+    (bagian 9).
+  - ARSITEKTUR PID: DIKONFIRMASI dari diskusi ulang sistem fisik -- PID
+    pindah ke HEATER (SSR, time-proportional), BUKAN pompa. Pompa jadi
+    ON/OFF relay diskrit (distribusi tangki->keran), dengan gerbang suhu
+    khusus malam (tunggu T_tangki capai setpoint dulu). Kolektor->tangki
+    DIKONFIRMASI pasif/thermosiphon, bukan dipompa. Lihat catatan versi
+    3.0 di awal file -- PERINGATAN: ini beda dari proposal tertulis yang
+    sudah di-ACC dosen, WAJIB dikonfirmasi ulang ke dosen pembimbing.
+  - DRIVER POMPA (v3.1): DIKONFIRMASI ganti dari relay diskrit (v3.0) ke
+    MOSFET diskrit (IRLB8721PbF), atas permintaan client supaya ada ruang
+    future-proof kalau nanti mau modifikasi kecepatan pompa. Firmware
+    TETAP ON/OFF sekarang (bukan PWM aktif) -- lihat bagian 3 & 9. Ini
+    sekaligus menghapus TBD lama soal rating kontak DC relay (tidak
+    relevan lagi, MOSFET tidak punya kontak mekanis).
+  - INPUT SETPOINT (v3.1): DIKONFIRMASI ganti dari rotary encoder fisik ke
+    web page + WebSocket yang di-hosting ESP32 sendiri (WiFi sudah
+    onboard, tanpa komponen tambahan), atas permintaan client, EKSPLISIT
+    discope-kan "buat demo dulu" -- sengaja tanpa cloud/app pihak ketiga
+    supaya tidak bergantung internet, cuma WiFi lokal. LCD 20x4 TETAP ada
+    utk status lokal. Lihat bagian 6 & 9.
+  - RAIL SUPLAI ESP32 (v3.1): DIKONFIRMASI pecah jadi 2 buck converter
+    terpisah -- BUCK_ESP (12V->7V, khusus ESP32) dan BUCK_LCD (12V->5V,
+    khusus LCD), atas pengalaman lapangan client (14 proyek ESP32: WiFi
+    gagal connect kalau VIN cuma ~5V, margin 7V menyelesaikan ini). Ini
+    juga menjawab TBD lama soal qty buck converter (2) di daftar
+    komponen -- sekarang jelas: 2 buck itu memang 2 rail berbeda, bukan
+    cadangan. Lihat bagian 2 utk rasional & mekanisme lengkap.
+
+--------------------------------------------------------------------------------
+ITEM YANG MASIH TBD / PERLU DIKONFIRMASI SEBELUM SOLDER
+--------------------------------------------------------------------------------
+  - Alamat I2C LCD backpack (0x27 ASUMSI umum, verifikasi dengan I2C
+    scanner sketch begitu part di tangan) -- perlu dites bareng BH1750
+    (0x23) di bus yang sama, pastikan tidak ada address collision di
+    kondisi part real.
+  - BARU (v3.1) -- mode WiFi ESP32 utk setpoint web/WebSocket: AP mode
+    (ESP32 bikin hotspot sendiri, HP connect langsung ke situ) atau STA
+    mode (ESP32 connect ke WiFi rumah/hotspot HP, browser akses lewat IP
+    di jaringan yang sama)? Pengaruh ke UX (AP = tidak perlu WiFi lain
+    tapi HP kehilangan akses internet selama connect ke ESP32; STA =
+    perlu WiFi yang sama, tapi HP tetap punya internet). WAJIB
+    dikonfirmasi sebelum firmware web server difinalisasi.
+  - BARU (v3.1) -- keamanan akses halaman setpoint: minimal auth apa pun
+    (password sederhana) atau full-open di jaringan lokal? Karena ini
+    "cuma buat demo", full-open mungkin cukup, tapi WAJIB didokumentasikan
+    di skripsi sbg batasan/asumsi, bukan didiamkan begitu saja.
+  - BARU (v3.1) -- power budget bagian 1 (Wh/day) BELUM direvisi utk
+    WiFi aktif terus-menerus (lihat catatan di bagian 1) -- estimasi lama
+    36 Wh/hari utk logic kemungkinan under-estimate, perlu dihitung ulang
+    dgn asumsi arus WiFi-active yang lebih realistis sebelum finalisasi
+    ukuran panel+baterai.
+  - BARU -- keputusan mekanik & keselamatan elemen pemanas (bagian 4):
+    (a) desain bracket/dudukan supaya gagang elemen konsumen ini tidak ikut
+    tercelup, (b) mau tidaknya tambah float switch interlock low-water di
+    firmware+wiring. Ini di luar scope PCB murni tapi mempengaruhi 1 pin +
+    1 komponen BOM kalau (b) disetujui -- perlu jawaban Agung/dosen dulu.
+  - BARU -- pilihan kimia baterai (lead-acid/AGM vs LiFePO4, bagian 1 &
+    10): perlu keputusan client berdasarkan budget, karena charge
+    controller MPPT harus di-set profil charging yang sesuai sebelum
+    baterai pertama kali dipakai.
+  - BARU -- ambang lux (AMBANG_LUX) untuk deteksi malam di firmware:
+    ASUMSI awal ~10 lux, WAJIB dikalibrasi di lokasi pemasangan asli
+    (kondisi pencahayaan sekitar tangki/kolektor bisa beda-beda, mis.
+    ada lampu jalan dekat lokasi yang bisa bikin deteksi salah).
+  - BARU -- irradiance riil lokasi TA: PSH 4 jam/hari di bagian 1 itu
+    ASUMSI perencanaan, cek data PVGIS/NASA POWER utk koordinat lokasi
+    sebenarnya sebelum finalisasi ukuran panel+baterai.
+  - BARU (v3.1) -- MOSFET pompa (IRLB8721PbF): datasheet Rds(on) resmi
+    cuma dikarakterisasi di Vgs=4.5V dan Vgs=10V, BUKAN persis di 3.3V
+    (gate drive ESP32). Dengan margin arus sebesar ini (5A dari kapasitas
+    62A) risikonya kecil, tapi idealnya cek kurva Rds(on) vs Vgs di
+    datasheet lengkap (bukan cuma tabel ringkas) sebelum solder final,
+    supaya yakin disipasi tetap rendah di titik gate drive 3.3V yang
+    sebenarnya dipakai.
+  - BARU (v3.0) -- rating input kontrol SSR heater: ASUMSI 3-32VDC (umum
+    utk part sekelas Fotek SSR-25DA), BELUM dicek ke datasheet resmi part
+    yang benar-benar dibeli -- pastikan GPIO27 (3.3V) cukup drive arus
+    opto internal SSR (biasanya perlu beberapa mA, cek spesifik).
+  - BARU (v3.0) -- mekanisme pemicu pompa: dari diskusi, pompa dipicu
+    "permintaan user" tapi BELUM jelas mekanismenya apa (tombol manual?
+    keran dibuka + flow/pressure switch? selalu ON kalau ada daya?) --
+    ini menentukan apakah perlu 1 pin GPIO tambahan + 1 komponen (switch/
+    flow sensor) di BOM. WAJIB dikonfirmasi ke Agung sebelum firmware
+    logika pompa (bagian 9) difinalisasi.
+  - BARU (v3.0) -- nilai timeout tunggu-panas pompa malam (bagian 9):
+    ASUMSI awal 10-15 menit, perlu disesuaikan setelah tuning PID heater
+    riil (berapa lama heater 500W butuh menaikkan suhu air dari kondisi
+    dingin ke setpoint, tergantung volume tangki yang belum diketahui
+    persis di sini).
+
+Jangan solder bagian yang masih TBD/ASUMSI di atas sebelum dikonfirmasi.
+
+--------------------------------------------------------------------------------
+VERIFIKASI DATASHEET (dicek ulang setelah draft pertama, bukan cuma dari ingatan)
+--------------------------------------------------------------------------------
+  - SUDAH TIDAK DIPAKAI DI v3.1 (dipertahankan di sini sbg histori, bukan
+    karena masih relevan ke desain aktif): Songle SRD-05VDC-SL-C (relay
+    bare, koil 0.36W@5V->72mA, kontak 250V/10A AC DIKONFIRMASI, tapi
+    creepage koil-kontak tidak ada di datasheet publik) dan BC337
+    (ON Semiconductor resmi, IC continuous 800mA, hFE min 250 @ IC=100mA,
+    DIKONFIRMASI) -- keduanya dipakai di desain relay diskrit pompa v3.0
+    yang sekarang digantikan MOSFET (bagian 3). 1N4148 (Vishay resmi,
+    IF(AV) 150mA kontinu) juga sudah tidak dipakai di jalur pompa (dulu
+    flyback koil relay) -- masih relevan di tempat lain kalau ada
+    kebutuhan flyback tegangan rendah/arus kecil lain di masa depan.
+    [SRD-05VDC-SL-C Datasheet](https://www.datasheetcafe.com/srd-05vdc-sl-c-datasheet-pdf/) |
+    [BC337 Datasheet (ON Semi via Mouser)](https://www.mouser.com/datasheet/2/308/BC337_D-2309963.pdf) |
+    [1N4148 Datasheet (Vishay)](https://www.vishay.com/docs/81857/1n4148.pdf)
+  - IRLB8721PbF (Infineon resmi, BARU AKTIF di v3.1 -- driver MOSFET
+    pompa, bagian 3): Vgs(th) 1.35-2.35V min/max (logic-level, nyala penuh
+    di gate drive 3.3V ESP32), Rds(on) maks 16mOhm @Vgs=4.5V, ID kontinu
+    62A @Vgs=10V/Tc=25C, total gate charge Qg 7.6-13nC. DIKONFIRMASI dari
+    datasheet resmi Infineon (sudah ditelusuri sebelumnya di sesi ini).
+    CATATAN: angka Rds(on) di atas dikarakterisasi di Vgs=4.5V/10V, bukan
+    persis di 3.3V yang dipakai ESP32 -- lihat item TBD terkait.
+  - SMBJ18A (Littelfuse resmi, TVS_12V, bagian 1/8): DIKONFIRMASI
+    unidirectional (bukan varian "CA" yang bidirectional). Standoff
+    (VRWM) 18V, breakdown 20.0-22.1V @1mA, clamp MAKSIMUM sebenarnya
+    29.2V @arus pulsa puncak -- KOREKSI dari draft sebelumnya yang
+    menulis "clamp ~18V" (itu keliru, 18V itu standoff/tegangan kerja
+    normal, BUKAN tegangan clamp). Katode ditandai pita di badan
+    komponen, WAJIB ke sisi NET_12V_BUS (polaritas terbalik = TVS gak
+    berfungsi sbg proteksi, bisa malah short/rusak).
+  - Fotek SSR-25DA (Fotek resmi + reseller, bagian 4): DIKONFIRMASI
+    input kontrol 4-32VDC (KOREKSI dari ASUMSI sebelumnya "3-32VDC"),
+    trigger current maks 12mA, output 24-380VAC/25A, zero-cross.
+    PENTING -- BELUM DIPERBAIKI DI NETLIST INI: 3.3V (GPIO27 ESP32
+    langsung, seperti wiring bagian 4 saat ini) ADA DI BAWAH rating
+    minimum 4V part ini. Rekomendasi: tambah driver transistor kecil
+    (GPIO27 -> basis, kolektor drive SSR dari NET_5V_LOGIC) supaya SSR
+    dapat tegangan drive yang jelas di dalam rating 4-32V-nya -- belum
+    diimplementasikan di wiring bagian 4, masih nunggu konfirmasi.
+  - DS18B20 (Analog Devices/Maxim resmi): pull-up "approximately 5kOhm",
+    diagram contoh pakai 4.7k. DIKONFIRMASI, sesuai yang dipakai di netlist.
+    [DS18B20 Datasheet](https://www.analog.com/media/en/technical-documentation/data-sheets/DS18B20.pdf)
+    [1N4148 Datasheet (Vishay)](https://www.vishay.com/docs/81857/1n4148.pdf)
+  - SS54: VF maks 0.55V @ 5A, IF 5A, VR 40V. DIKONFIRMASI (dipakai sbg
+    referensi pemilihan sebelum diganti ke SB1040 -- lihat catatan di
+    bagian 1/3 kenapa SS54 tidak cukup lagi setelah pompa dikonfirmasi 5A).
+    [SS54 Specifications](https://components101.com/diodes/ss54-schottky-power-diode)
+  - SB1040: rating datasheet umum 10A / 40V, VF tipikal ~0.55-0.75V @ 10A,
+    25C (angka dari beberapa datasheet pabrikan SB10xx-series yang beredar
+    di pasaran -- part generik ini punya banyak pabrikan/varian, JADI:
+    kalau part fisik sudah di tangan, cek label/datasheet seller-nya
+    sendiri untuk pastikan rating 10A/40V benar-benar sesuai, bukan cuma
+    ikut nama part).
+
+  CATATAN SUMBER DATA UNTUK REVISI TERBARU (bukan datasheet, tapi data
+  dari client langsung -- statusnya DIKONFIRMASI karena sumbernya primer,
+  cuma bukan "diverifikasi ke datasheet pihak ketiga"):
+  - Arus pompa DC 12V/5A: dari pernyataan client langsung, bukan dari
+    datasheet/label yang dibaca Asad sendiri -- tetap DIKONFIRMASI (client
+    adalah sumber primer untuk part yang mereka beli sendiri), tapi kalau
+    ada kesempatan, cek label fisik pompa begitu terpasang untuk pastikan
+    angka 5A ini arus nominal/rated, bukan arus stall/lock-rotor (biasanya
+    jauh lebih tinggi dan cuma sesaat) -- ini akan mempengaruhi apakah 5A
+    dipakai sebagai continuous rating (asumsi netlist ini) sudah benar.
+  - Elemen pemanas 500W/220V: dari listing produk yang di-paste client
+    (bukan datasheet pabrikan formal -- produk konsumen marketplace jarang
+    menerbitkan datasheet). Rating watt/voltase DIKONFIRMASI dari listing,
+    TAPI proteksi thermal/dry-fire TIDAK disebutkan di listing sama sekali
+    -- ini bukan berarti tidak ada, tapi tidak bisa diasumsikan ADA juga.
+    Lihat catatan lengkap & rekomendasi di bagian 4.
+
+  BELUM/TIDAK bisa dicek dari datasheet publik (part belum ditentukan
+  atau tidak diterbitkan seller): coil voltage relay yang benar-benar
+  dibeli, creepage relay. Ini tetap ASUMSI/TBD sampai part di tangan --
+  lihat daftar di atas.
+
+  BELUM DICEK DI REVISI v2.0/v3.0 INI (jujur, bukan diklaim sudah
+  diverifikasi): arus draw ESP32 devkit spesifik (angka ~0.5W rata-rata di
+  bagian 1 itu estimasi umum dari karakteristik chip ESP32 secara umum,
+  BUKAN dari datasheet board devkit tertentu -- beda vendor devkit bisa
+  beda konsumsi quiescent regulator onboardnya), datasheet BH1750 resmi
+  (dipakai berdasarkan spesifikasi umum modul breakout yang lazim beredar,
+  belum ditelusuri ke datasheet asli ROHM), dan rating arus modul level
+  shifter BSS138 generik (biasanya cukup untuk I2C standard-mode, tapi
+  belum dicek ke datasheet modul spesifik). Kalau part-part ini sudah di
+  tangan, sebaiknya dicek ulang sebelum solder final -- sama seperti
+  bagian lain di netlist ini yang sudah lebih dulu diverifikasi ke
+  datasheet resmi.
+  - BARU (v3.0) -- SSR heater (Fotek SSR-25DA atau sekelasnya, bagian 4):
+    BELUM diverifikasi ke datasheet resmi part yang benar-benar dibeli.
+    Spek yang dipakai di netlist ini (input kontrol 3-32VDC, output
+    25A/220-380VAC, perlu heatsink) adalah ASUMSI berbasis spek umum kelas
+    part ini di pasaran, BUKAN dari datasheet Fotek resmi yang sudah
+    ditelusuri langsung. Sebelum beli/solder: cek datasheet part fisiknya
+    utk memastikan (a) arus minimum trigger input cukup didrive GPIO27
+    ESP32 (3.3V, terbatas ~12mA per pin) lewat R_SSR_SIG 220R, (b) rating
+    output cukup untuk elemen pemanas 500W/220V (~2.27A) dengan margin
+    aman, (c) kebutuhan heatsink aktual sesuai datasheet thermal resistance
+    part yang dibeli, bukan cuma estimasi 2.5-3.5W di bagian 4.
+================================================================================
+END OF NETLIST v3.1
+================================================================================

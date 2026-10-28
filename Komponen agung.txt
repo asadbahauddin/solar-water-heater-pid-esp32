@@ -1,0 +1,29 @@
+ini dulu mas
+komponen agung
+1. ESP32 30 pin
+2. LCD 20x4 I2c dan modul i2cnya
+3. BH1750
+4. DS18B20 (2)
+5. charge control MPTT panel Surya
+6. XL4016 (2)
+7. AMS1117-3.3 (2)
+8. Pompa DC 12v
+9. SSR minimal 10 A
+10. level shifter I2c BSS138
+11. MOSFET IRLB8721PbF
+12. R220
+13. R100
+14. R10K
+15. R4.7K(2)
+16. SB1040, 10A/40V (2)
+17. Dioda TVS SMBJ18A 
+18. elko 1000uF/25V
+19. keramik 100nF/50V (3)
+20. elko 470uF/16V
+21. elko 100uF/16V
+22. keramik 100nF 
+23. keramik 10uF 
+24. Rumah+fuse 8A
+25. Rumah+fuse 7A
+26. Rumah+fuse 1A
+27. Rumah+fuse 3A

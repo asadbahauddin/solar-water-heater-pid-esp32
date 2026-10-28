@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# Dokumen skripsi tidak ikut dipublikasikan
+180526-Skripsi*.pdf
