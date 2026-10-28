@@ -20,12 +20,6 @@ if errorlevel 1 (
 )
 
 cd /d "%~dp0"
-
-REM Nama file CSV dibuat di sini supaya logger dan grafik pakai file yang sama.
-for /f %%i in ('python -c "import datetime; print(datetime.datetime.now().strftime('swh_log_%%Y%%m%%d_%%H%%M%%S.csv'))"') do set "LOG=%%i"
-
-REM Grafik live di jendela terpisah (menutupnya tidak menghentikan perekaman).
-start "Grafik SWH" python swh_plot.py "%LOG%"
-
-python swh_logger.py -o "%LOG%" %*
+REM Logger otomatis membuka jendela grafik (swh_plot.py).
+python swh_logger.py %*
 pause

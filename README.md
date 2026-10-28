@@ -216,15 +216,15 @@ Grafik berjalan sebagai proses terpisah yang hanya membaca berkas. Dengan begitu
 ```bash
 pip install websockets matplotlib
 # sambungkan laptop ke WiFi SWH_PID_Agung terlebih dahulu
-python swh_logger.py                      # -> swh_log_<YYYYMMDD_HHMMSS>.csv
+python swh_logger.py                      # -> swh_log_<YYYYMMDD_HHMMSS>.csv + jendela grafik otomatis
 python swh_logger.py -o percobaan_1.csv   # nama berkas kustom (append bila sudah ada)
+python swh_logger.py --no-plot            # tanpa grafik
 python swh_logger.py --help               # opsi backoff & timeout
 
-python swh_plot.py                        # grafik live dari CSV terbaru (jendela/terminal lain)
-python swh_plot.py percobaan_1.csv --window 60   # berkas tertentu, 60 menit terakhir
+python swh_plot.py percobaan_1.csv --window 60   # buka grafik manual: berkas tertentu, 60 menit terakhir
 ```
 
-Di Windows dengan Anaconda (environment `swh`), cukup klik dua kali `mulai_logger.bat`. *Logger* dan jendela grafik akan berjalan bersamaan pada berkas CSV yang sama.
+*Logger* membuka `swh_plot.py` sebagai proses terpisah bila `matplotlib` tersedia. Bila tidak, perekaman tetap berjalan tanpa grafik. Ctrl+C hanya menghentikan *logger*, sedangkan jendela grafik tetap terbuka sampai ditutup manual. Di Windows dengan Anaconda (environment `swh`), cukup klik dua kali `mulai_logger.bat`.
 
 Untuk perekaman panjang, nonaktifkan mode *sleep* laptop dan cegah Windows berpindah otomatis ke jaringan WiFi lain, karena AP ESP32 tidak menyediakan internet.
 

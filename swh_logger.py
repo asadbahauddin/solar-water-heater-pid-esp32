@@ -7,16 +7,21 @@ langsung ditulis 1 baris ke CSV lalu flush + fsync, jadi data aman di disk
 walaupun script/koneksi putus. Auto-reconnect dengan backoff, append ke file
 CSV yang sama.
 
-Dependency: pip install websockets
-Pemakaian : python swh_logger.py [-o nama_file.csv] [--url ws://...]
+Grafik live (swh_plot.py) otomatis dibuka di proses terpisah kalau matplotlib
+terinstall; menutup grafik tidak menghentikan perekaman. Matikan dengan --no-plot.
+
+Dependency: pip install websockets   (opsional untuk grafik: pip install matplotlib)
+Pemakaian : python swh_logger.py [-o nama_file.csv] [--url ws://...] [--no-plot]
 """
 
 import argparse
 import asyncio
 import csv
+import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 
@@ -157,6 +162,30 @@ async def run(args, sink):
         backoff = min(backoff * 2, args.max_backoff)
 
 
+def start_plot(csv_path):
+    """Buka swh_plot.py di proses terpisah. Gagal di sini tidak menghentikan logging."""
+    plot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swh_plot.py")
+    if not os.path.exists(plot_script):
+        log("Grafik tidak dibuka: swh_plot.py tidak ada di folder yang sama.")
+        return
+    if importlib.util.find_spec("matplotlib") is None:
+        log("Grafik tidak dibuka: matplotlib belum terinstall (pip install matplotlib).")
+        return
+    # Process group sendiri: Ctrl+C di terminal hanya menghentikan logger,
+    # jendela grafik tetap terbuka untuk dilihat sampai ditutup manual.
+    if os.name == "nt":
+        kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        kwargs = {"start_new_session": True}
+    try:
+        subprocess.Popen([sys.executable, plot_script, os.path.abspath(csv_path)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         stdin=subprocess.DEVNULL, **kwargs)
+        log("Jendela grafik dibuka (menutupnya tidak menghentikan perekaman).")
+    except OSError as e:
+        log(f"Grafik tidak dibuka: {e}")
+
+
 def main():
     start = datetime.now()
     p = argparse.ArgumentParser(description="Logger telemetri ESP32 SWH PID ke CSV.")
@@ -170,10 +199,13 @@ def main():
     p.add_argument("--timeout", type=float, default=5.0, help="timeout buka koneksi, detik (default 5)")
     p.add_argument("--rx-timeout", type=float, default=10.0,
                    help="anggap putus kalau tidak ada data selama N detik (default 10)")
+    p.add_argument("--no-plot", action="store_true", help="jangan buka jendela grafik")
     args = p.parse_args()
 
     sink = CsvSink(args.output)
     log(f"Logging ke: {os.path.abspath(args.output)}")
+    if not args.no_plot:
+        start_plot(args.output)
     log("Tekan Ctrl+C untuk berhenti.")
     try:
         asyncio.run(run(args, sink))
