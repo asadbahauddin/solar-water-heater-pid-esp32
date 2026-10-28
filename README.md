@@ -168,6 +168,16 @@ Format CSV: `wall_time,t,tangki,kolektor,lux,night,pump,heaterDuty,mode,dnOverri
 
 Celah data selama koneksi terputus tidak dapat dipulihkan, karena ESP32 tidak menyimpan riwayat. Celah tersebut terlihat sebagai lompatan pada `wall_time`.
 
+### Visualisasi *live*
+
+[`swh_plot.py`](swh_plot.py) menampilkan grafik yang diperbarui tiap 2 s dari CSV yang sedang ditulis *logger*:
+
+1. Suhu tangki, suhu kolektor, dan *setpoint*.
+2. Intensitas cahaya.
+3. *Duty* heater dan status pompa.
+
+Grafik berjalan sebagai proses terpisah yang hanya membaca berkas. Dengan begitu, menutup jendela grafik (atau galat pada grafik) tidak memengaruhi perekaman. Hanya baris CSV yang sudah lengkap yang dibaca. Pembacaan sensor error (`-127`, lux negatif) tidak digambar, dan periode koneksi terputus (> 10 s) ditampilkan sebagai garis yang terputus.
+
 ## 7. Prosedur Eksperimen
 
 1. **Uji perangkat keras (`MANUAL`).** Verifikasi pembacaan sensor, pompa, dan heater ON/OFF.
@@ -183,6 +193,8 @@ Celah data selama koneksi terputus tidak dapat dipulihkan, karena ESP32 tidak me
 ├── Esp_agung/
 │   └── Esp_agung.ino              # Firmware ESP32 (PID, WebSocket, dashboard, safety)
 ├── swh_logger.py                  # Data logger telemetri ke CSV
+├── swh_plot.py                    # Grafik live dari CSV
+├── mulai_logger.bat               # Jalankan logger + grafik dengan klik dua kali (Windows)
 ├── swh_log_*.csv                  # Contoh data hasil perekaman
 ├── NETLIST_SWH_PID_Agung_v1.txt   # Netlist, perhitungan daya, catatan desain & BOM
 ├── SCH_Agung_2026-09-14.pdf       # Skematik
@@ -202,12 +214,17 @@ Celah data selama koneksi terputus tidak dapat dipulihkan, karena ESP32 tidak me
 ### 9.2 Data Logger
 
 ```bash
-pip install websockets
+pip install websockets matplotlib
 # sambungkan laptop ke WiFi SWH_PID_Agung terlebih dahulu
 python swh_logger.py                      # -> swh_log_<YYYYMMDD_HHMMSS>.csv
 python swh_logger.py -o percobaan_1.csv   # nama berkas kustom (append bila sudah ada)
 python swh_logger.py --help               # opsi backoff & timeout
+
+python swh_plot.py                        # grafik live dari CSV terbaru (jendela/terminal lain)
+python swh_plot.py percobaan_1.csv --window 60   # berkas tertentu, 60 menit terakhir
 ```
+
+Di Windows dengan Anaconda (environment `swh`), cukup klik dua kali `mulai_logger.bat`. *Logger* dan jendela grafik akan berjalan bersamaan pada berkas CSV yang sama.
 
 Untuk perekaman panjang, nonaktifkan mode *sleep* laptop dan cegah Windows berpindah otomatis ke jaringan WiFi lain, karena AP ESP32 tidak menyediakan internet.
 
