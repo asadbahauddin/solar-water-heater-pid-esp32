@@ -30,7 +30,7 @@ except ImportError:
     sys.exit(1)
 
 SENSOR_ERROR = -127
-GAP_SECONDS = 10  # jeda antar sampel > ini dianggap putus -> garis diputus
+GAP_SECONDS = 10  # ambang putus minimum; aslinya max(ini, 2.5x interval sampel)
 
 
 def newest_log():
@@ -57,6 +57,7 @@ class CsvTail:
         self.header = None
         self.pending = ""
         self.last_time = None
+        self.base_dt = None  # interval sampel terkecil yang terlihat (detik)
         self.data = {k: [] for k in ("time", "tangki", "kolektor", "sp", "lux", "duty", "pump")}
 
     def poll(self):
@@ -90,7 +91,13 @@ class CsvTail:
         except (KeyError, ValueError):
             return
         d = self.data
-        if self.last_time is not None and (t - self.last_time).total_seconds() > GAP_SECONDS:
+        # Ambang "putus" mengikuti interval sampel yang terlihat (2 detik atau
+        # 60 detik tergantung --interval logger): putus = jeda > 2.5x interval.
+        dt = (t - self.last_time).total_seconds() if self.last_time is not None else None
+        if dt is not None and dt > 0.5:
+            self.base_dt = dt if self.base_dt is None else min(self.base_dt, dt)
+        gap_limit = max(GAP_SECONDS, 2.5 * (self.base_dt or 0))
+        if dt is not None and dt > gap_limit:
             # sisipkan NaN supaya garis tidak menyambung melewati periode putus
             d["time"].append(self.last_time + timedelta(seconds=1))
             for k in ("tangki", "kolektor", "sp", "lux", "duty", "pump"):

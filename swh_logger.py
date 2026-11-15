@@ -2,16 +2,16 @@
 """
 SWH PID Logger - logger telemetri ESP32 Solar Water Heater via WebSocket.
 
-Konek ke ws://192.168.4.1/ws (ESP32 SoftAP "SWH_PID_Agung"), setiap pesan JSON
-langsung ditulis 1 baris ke CSV lalu flush + fsync, jadi data aman di disk
-walaupun script/koneksi putus. Auto-reconnect dengan backoff, append ke file
-CSV yang sama.
+Konek ke ws://192.168.4.1/ws (ESP32 SoftAP "SWH_PID_Agung"). Satu sampel per
+interval (default 60 detik) ditulis 1 baris ke CSV lalu langsung flush + fsync,
+jadi data aman di disk walaupun script/koneksi putus. Terminal tetap update tiap
+pesan (~2 detik). Auto-reconnect dengan backoff, append ke file CSV yang sama.
 
 Grafik live (swh_plot.py) otomatis dibuka di proses terpisah kalau matplotlib
 terinstall; menutup grafik tidak menghentikan perekaman. Matikan dengan --no-plot.
 
 Dependency: pip install websockets   (opsional untuk grafik: pip install matplotlib)
-Pemakaian : python swh_logger.py [-o nama_file.csv] [--url ws://...] [--no-plot]
+Pemakaian : python swh_logger.py [-o nama_file.csv] [--interval 60] [--url ws://...] [--no-plot]
 """
 
 import argparse
@@ -20,6 +20,7 @@ import csv
 import importlib.util
 import io
 import json
+import math
 import os
 import subprocess
 import sys
@@ -118,7 +119,9 @@ def status_line(wall, d, n):
 
 async def run(args, sink):
     backoff = args.min_backoff
-    count = 0
+    count = 0      # pesan diterima
+    saved = 0      # baris tersimpan ke CSV
+    next_due = 0.0 # epoch detik; 0 -> pesan pertama langsung disimpan
     last_t = None
 
     while True:
@@ -146,8 +149,17 @@ async def run(args, sink):
                         log(f"Pesan diabaikan (JSON tidak valid: {e}): {str(raw)[:80]!r}")
                         continue
 
-                    sink.write(wall.isoformat(timespec="milliseconds"), data)
                     count += 1
+                    # Simpan satu sampel per interval, di sampel pertama yang
+                    # lewat batas interval (rata ke jam: 10:01:00, 10:02:00, ...).
+                    # Terminal tetap menampilkan setiap pesan.
+                    now_ts = wall.timestamp()
+                    do_save = args.interval <= 0 or now_ts >= next_due
+                    if do_save:
+                        sink.write(wall.isoformat(timespec="milliseconds"), data)
+                        saved += 1
+                        if args.interval > 0:
+                            next_due = (math.floor(now_ts / args.interval) + 1) * args.interval
 
                     t = data.get("t")
                     if isinstance(t, (int, float)):
@@ -155,7 +167,8 @@ async def run(args, sink):
                             log("Catatan: 't' ESP32 mundur -> kemungkinan ESP32 reboot.")
                         last_t = t
 
-                    print(status_line(wall, data, count), flush=True)
+                    print(status_line(wall, data, count) + ("  [disimpan]" if do_save else ""),
+                          flush=True)
 
         except asyncio.CancelledError:
             raise
@@ -164,7 +177,7 @@ async def run(args, sink):
         except Exception as e:  # OSError, ConnectionClosed, InvalidHandshake, dll
             log(f"Koneksi putus/gagal: {type(e).__name__}: {e}")
 
-        log(f"Reconnect dalam {backoff:.0f} detik... (total baris tersimpan: {count})")
+        log(f"Reconnect dalam {backoff:.0f} detik... (total baris tersimpan: {saved})")
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, args.max_backoff)
 
@@ -206,11 +219,17 @@ def main():
     p.add_argument("--timeout", type=float, default=5.0, help="timeout buka koneksi, detik (default 5)")
     p.add_argument("--rx-timeout", type=float, default=10.0,
                    help="anggap putus kalau tidak ada data selama N detik (default 10)")
+    p.add_argument("--interval", type=float, default=60.0,
+                   help="simpan 1 baris tiap N detik (default 60 = per menit; 0 = semua data, ~2 detik)")
     p.add_argument("--no-plot", action="store_true", help="jangan buka jendela grafik")
     args = p.parse_args()
 
     sink = CsvSink(args.output)
     log(f"Logging ke: {os.path.abspath(args.output)}")
+    if args.interval > 0:
+        log(f"Data disimpan 1 baris tiap {args.interval:g} detik (terminal tetap update tiap pesan).")
+    else:
+        log("Data disimpan setiap pesan (~2 detik).")
     if not args.no_plot:
         start_plot(args.output)
     log("Tekan Ctrl+C untuk berhenti.")

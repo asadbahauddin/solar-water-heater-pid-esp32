@@ -193,7 +193,8 @@ Data di *dashboard* hanya tersimpan di memori JavaScript dan hilang saat tab dit
 
 | Aspek | Implementasi |
 |---|---|
-| Durabilitas | Setiap sampel ditulis satu baris lalu langsung `flush()` + `os.fsync()`. Data yang sudah diterima tetap aman walau proses atau koneksi terputus. |
+| Interval penyimpanan | Satu sampel per interval (default 60 s, diatur dengan `--interval`; `0` = setiap pesan ~2 s). Sampel yang disimpan adalah pesan pertama setelah batas interval, sehingga baris jatuh rata di awal tiap menit. Terminal tetap menampilkan setiap pesan. |
+| Durabilitas | Setiap baris yang disimpan langsung di-`flush()` + `os.fsync()`. Data yang sudah tersimpan tetap aman walau proses atau koneksi terputus. |
 | Atomisitas baris | Baris diformat ke *string* dulu lalu ditulis dengan satu `write()`, sehingga tidak ada baris setengah jadi saat Ctrl+C. |
 | Acuan waktu absolut | Kolom `wall_time` (ISO 8601, ms) dari jam laptop ditambahkan, karena `t` dari ESP32 reset ke 0 setiap reboot. |
 | Pemulihan koneksi | *Reconnect* otomatis dengan *exponential backoff* 2 → 4 → 8 → … → 30 s, reset ke 2 s setelah berhasil. Data di-*append* ke berkas yang sama. |
@@ -212,7 +213,7 @@ Celah data selama koneksi terputus tidak dapat dipulihkan, karena ESP32 tidak me
 2. Intensitas cahaya.
 3. *Duty* heater dan *duty* pompa.
 
-Grafik berjalan sebagai proses terpisah yang hanya membaca berkas. Dengan begitu, menutup jendela grafik (atau galat pada grafik) tidak memengaruhi perekaman. Hanya baris CSV yang sudah lengkap yang dibaca. Pembacaan sensor error (`-127`, lux negatif) tidak digambar, dan periode koneksi terputus (> 10 s) ditampilkan sebagai garis yang terputus.
+Grafik berjalan sebagai proses terpisah yang hanya membaca berkas. Dengan begitu, menutup jendela grafik (atau galat pada grafik) tidak memengaruhi perekaman. Hanya baris CSV yang sudah lengkap yang dibaca. Pembacaan sensor error (`-127`, lux negatif) tidak digambar, dan periode koneksi terputus (jeda > 2,5× interval sampel, minimal 10 s) ditampilkan sebagai garis yang terputus.
 
 ## 7. Prosedur Eksperimen
 
@@ -259,6 +260,7 @@ pip install websockets matplotlib
 # sambungkan laptop ke WiFi SWH_PID_Agung terlebih dahulu
 python swh_logger.py                      # -> swh_log_<YYYYMMDD_HHMMSS>.csv + jendela grafik otomatis
 python swh_logger.py -o percobaan_1.csv   # nama berkas kustom (append bila sudah ada)
+python swh_logger.py --interval 0         # simpan semua data (~2 s), mis. untuk step test
 python swh_logger.py --no-plot            # tanpa grafik
 python swh_logger.py --help               # opsi backoff & timeout
 
