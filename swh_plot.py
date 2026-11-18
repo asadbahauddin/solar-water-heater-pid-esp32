@@ -153,9 +153,10 @@ def main():
     ax_lux.legend(loc="upper left", fontsize=9)
     ax_lux.grid(alpha=0.3)
 
-    (l_duty,) = ax_out.plot([], [], color="tab:purple", lw=1.2, label="Heater duty")
-    (l_pump,) = ax_out.plot([], [], color="tab:green", lw=1.2, label="Pompa duty")
-    ax_out.set_ylabel("%")
+    (l_duty,) = ax_out.plot([], [], color="tab:purple", lw=1.2, label="Heater PWM (PID malam)")
+    (l_pump,) = ax_out.plot([], [], color="tab:green", lw=1.2, label="Pompa PWM (PID siang)")
+    ax_out.axhline(50, color="tab:green", lw=0.8, ls=":", alpha=0.6, label="PWM minimum pompa (50%)")
+    ax_out.set_ylabel("PWM duty (%)")
     ax_out.set_ylim(-5, 105)
     ax_out.legend(loc="upper left", fontsize=9)
     ax_out.grid(alpha=0.3)
