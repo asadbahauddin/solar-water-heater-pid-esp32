@@ -99,7 +99,7 @@ Dua instans PID dengan struktur yang sama dijalankan bergantian, masing-masing d
 |---|---|---|
 | Aktuator | Heater, PWM 1 kHz | Pompa, PWM 20 kHz |
 | *Gain* awal (*placeholder*) | $K_p = 5$, $K_i = 0{,}05$, $K_d = 0$ | $K_p = 10$, $K_i = 0{,}1$, $K_d = 0$ |
-| Pemetaan keluaran | $u$ langsung | $u < 0{,}5\%$ → 0; selain itu $\max(u,\ u_{\min})$, dengan $u_{\min}$ = *duty* minimum pompa (default 30%) |
+| Pemetaan keluaran | $u$ langsung | $u < 0{,}5\%$ → 0; selain itu $\max(u,\ u_{\min})$, dengan $u_{\min}$ = *duty* minimum pompa (50–100%, default 50%) |
 
 Instans yang tidak aktif di-reset (integrator dan memori derivatif dikosongkan), sehingga peralihan siang ↔ malam selalu dimulai tanpa sisa akumulasi integral dari aktuator lain.
 

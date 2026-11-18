@@ -176,7 +176,8 @@ CARA PAKAI:
 // Default parameter pompa (bisa diubah & disimpan dari dashboard)
 #define DT_ON_DEFAULT            5.0      // pompa diizinkan kalau T_kolektor - T_tangki >= ini
 #define DT_OFF_DEFAULT           2.0      // dan dilarang lagi kalau selisihnya < ini
-#define PUMP_MIN_DUTY_DEFAULT    30.0     // duty minimum saat pompa jalan (di bawah ini pompa bisa macet)
+#define PUMP_MIN_DUTY_DEFAULT    50.0     // duty minimum saat pompa jalan (di bawah ini pompa bisa macet)
+#define PUMP_MIN_DUTY_FLOOR      50.0     // batas bawah absolut: duty min tidak bisa diset di bawah ini
 
 // ---------------- MODE & STATE ----------------------------------------------
 enum ControlMode { MODE_MANUAL = 0, MODE_STEP_TEST = 1, MODE_AUTO_PID = 2 };
@@ -525,7 +526,7 @@ void setup() {
   pidPump.kd    = prefs.getFloat("pkd", pidPump.kd);
   dtOn          = prefs.getFloat("dton", dtOn);
   dtOff         = prefs.getFloat("dtoff", dtOff);
-  pumpMinDuty   = prefs.getFloat("pmin", pumpMinDuty);
+  pumpMinDuty   = constrain(prefs.getFloat("pmin", pumpMinDuty), PUMP_MIN_DUTY_FLOOR, 100.0f);  // nilai lama 30% di flash ikut naik ke 50%
   luxMalam      = prefs.getFloat("luxm", luxMalam);
   luxSiang      = prefs.getFloat("luxs", luxSiang);
   pidSetpoint = constrain(pidSetpoint, SETPOINT_MIN_C, SETPOINT_MAX_C);
@@ -628,7 +629,7 @@ void handleCommand(String msg) {
   } else if (msg.startsWith("SET_DTOFF:")) {
     dtOff = constrain(msg.substring(10).toFloat(), 0.0f, dtOn - 0.5f);
   } else if (msg.startsWith("SET_PMIN:")) {
-    pumpMinDuty = constrain(msg.substring(9).toFloat(), 0.0f, 100.0f);
+    pumpMinDuty = constrain(msg.substring(9).toFloat(), PUMP_MIN_DUTY_FLOOR, 100.0f);
   } else if (msg.startsWith("SET_LUXM:")) {
     // Dashboard kirim LUXM dulu baru LUXS, jadi LUXS yang menyesuaikan.
     luxMalam = max(0.0f, msg.substring(9).toFloat());
