@@ -32,12 +32,11 @@ DEFAULT_URL = "ws://192.168.4.1/ws"
 SENSOR_ERROR = -127
 
 # Urutan kolom CSV: timestamp wall-clock laptop dulu, lalu field dari ESP32.
-# Kolom baru (firmware v4, PID siang di pompa) ditaruh di belakang supaya
-# urutan kolom lama tidak berubah.
+# Pompa dicatat sebagai pumpDuty (0-100 %), bukan pump 1/0.
 ESP_FIELDS = [
-    "t", "tangki", "kolektor", "lux", "night", "pump", "heaterDuty",
+    "t", "tangki", "kolektor", "lux", "night", "pumpDuty", "heaterDuty",
     "mode", "dnOverride", "emergency", "sp", "kp", "ki", "kd",
-    "pumpDuty", "dtOk", "pkp", "pki", "pkd", "dtOn", "dtOff", "pmin", "luxM", "luxS",
+    "dtOk", "pkp", "pki", "pkd", "dtOn", "dtOff", "pmin", "luxM", "luxS",
 ]
 CSV_FIELDS = ["wall_time"] + ESP_FIELDS
 
@@ -72,6 +71,9 @@ class CsvSink:
         os.fsync(self.f.fileno())
 
     def write(self, wall_time, data):
+        if "pumpDuty" not in data and "pump" in data:
+            # Firmware lama cuma kirim pump true/false -> 100/0 supaya kolom tetap terisi.
+            data = dict(data, pumpDuty=100 if data["pump"] else 0)
         row = [wall_time]
         for key in ESP_FIELDS:
             v = data.get(key, "")

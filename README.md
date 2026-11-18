@@ -201,7 +201,7 @@ Data di *dashboard* hanya tersimpan di memori JavaScript dan hilang saat tab dit
 | Deteksi koneksi mati | *Watchdog* penerimaan 10 s. Putus WiFi sering tidak menutup soket TCP, sehingga ketiadaan data dipakai sebagai indikator. |
 | Deteksi reboot ESP32 | Peringatan dicetak bila nilai `t` menurun. |
 
-Format CSV: `wall_time` diikuti seluruh field telemetri §5.1 dengan urutan yang sama. Nilai boolean ditulis `1`/`0`. *Logger* menolak meng-*append* ke CSV yang kolomnya berbeda (berkas dari versi lama), agar kolom tidak bergeser.
+Format CSV: `wall_time,t,tangki,kolektor,lux,night,pumpDuty,heaterDuty,mode,dnOverride,emergency,sp,kp,ki,kd,dtOk,pkp,pki,pkd,dtOn,dtOff,pmin,luxM,luxS`. Pompa dicatat sebagai `pumpDuty` (0–100 %), bukan `pump` 1/0. Bila firmware lama hanya mengirim `pump`, nilainya dicatat sebagai 100/0. Nilai boolean lain ditulis `1`/`0`. *Logger* menolak meng-*append* ke CSV yang kolomnya berbeda (berkas dari versi lama), agar kolom tidak bergeser.
 
 Celah data selama koneksi terputus tidak dapat dipulihkan, karena ESP32 tidak menyimpan riwayat. Celah tersebut terlihat sebagai lompatan pada `wall_time`.
 
