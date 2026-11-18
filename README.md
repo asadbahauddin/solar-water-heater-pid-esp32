@@ -99,7 +99,7 @@ Dua instans PID dengan struktur yang sama dijalankan bergantian, masing-masing d
 |---|---|---|
 | Aktuator | Heater, PWM 1 kHz | Pompa, PWM 20 kHz |
 | *Gain* awal (*placeholder*) | $K_p = 5$, $K_i = 0{,}05$, $K_d = 0$ | $K_p = 10$, $K_i = 0{,}1$, $K_d = 0$ |
-| Pemetaan keluaran | $u$ langsung | $u < 0{,}5\%$ → 0; selain itu $\max(u,\ u_{\min})$, dengan $u_{\min}$ = *duty* minimum pompa (50–100%, default 50%) |
+| Pemetaan keluaran | $u$ langsung | $u < 0{,}5\%$ → 0; selain itu $\max(u,\ u_{\min})$, dengan $u_{\min}$ = *duty* minimum pompa (50–100%, default 50% = PWM 127 dari 255) |
 
 Instans yang tidak aktif di-reset (integrator dan memori derivatif dikosongkan), sehingga peralihan siang ↔ malam selalu dimulai tanpa sisa akumulasi integral dari aktuator lain.
 
@@ -159,7 +159,7 @@ ESP32 beroperasi sebagai *Access Point* (SSID `SWH_PID_Agung`, IP `192.168.4.1`)
 {"t":123456,"tangki":45.12,"kolektor":61.80,"lux":3250.0,"night":false,
  "pump":true,"heaterDuty":0.0,"mode":"AUTO_PID","dnOverride":"AUTO",
  "emergency":false,"sp":50.00,"kp":5.000,"ki":0.050,"kd":0.000,
- "pumpDuty":42.5,"dtOk":true,"pkp":10.000,"pki":0.100,"pkd":0.000,
+ "pumpDuty":42.5,"heaterPwm":0,"pumpPwm":108,"dtOk":true,"pkp":10.000,"pki":0.100,"pkd":0.000,
  "dtOn":5.0,"dtOff":2.0,"pmin":30,"luxM":10,"luxS":50}
 ```
 
@@ -177,6 +177,7 @@ ESP32 beroperasi sebagai *Access Point* (SSID `SWH_PID_Agung`, IP `192.168.4.1`)
 | `sp` | float | *Setpoint* (bersama) |
 | `kp`, `ki`, `kd` | float | *Gain* PID malam (heater) |
 | `pumpDuty` | float | Keluaran pompa 0–100 % |
+| `heaterPwm`, `pumpPwm` | int | Nilai PWM asli yang ditulis ke pin (0–255, 8-bit) |
 | `dtOk` | bool | Gerbang ΔT pompa terbuka |
 | `pkp`, `pki`, `pkd` | float | *Gain* PID siang (pompa) |
 | `dtOn`, `dtOff` | float | Ambang gerbang ΔT (°C) |
@@ -201,7 +202,7 @@ Data di *dashboard* hanya tersimpan di memori JavaScript dan hilang saat tab dit
 | Deteksi koneksi mati | *Watchdog* penerimaan 10 s. Putus WiFi sering tidak menutup soket TCP, sehingga ketiadaan data dipakai sebagai indikator. |
 | Deteksi reboot ESP32 | Peringatan dicetak bila nilai `t` menurun. |
 
-Format CSV: `wall_time,t,tangki,kolektor,lux,night,pumpDuty,heaterDuty,mode,dnOverride,emergency,sp,kp,ki,kd,dtOk,pkp,pki,pkd,dtOn,dtOff,pmin,luxM,luxS`. Pompa dicatat sebagai `pumpDuty` (0–100 %), bukan `pump` 1/0. Bila firmware lama hanya mengirim `pump`, nilainya dicatat sebagai 100/0. Nilai boolean lain ditulis `1`/`0`. *Logger* menolak meng-*append* ke CSV yang kolomnya berbeda (berkas dari versi lama), agar kolom tidak bergeser.
+Format CSV: `wall_time,t,tangki,kolektor,lux,night,pumpPwm,heaterPwm,mode,dnOverride,emergency,sp,kp,ki,kd,dtOk,pkp,pki,pkd,dtOn,dtOff,pmin,luxM,luxS`. Pompa dan heater dicatat sebagai **nilai PWM asli 0–255** (`pumpPwm`, `heaterPwm`), bukan persen. Bila firmware lama hanya mengirim persen atau `pump` true/false, nilainya dikonversi dengan rumus yang sama dengan firmware (PWM = persen × 255 / 100, dibulatkan ke bawah; `pump` → 255/0). Nilai boolean lain ditulis `1`/`0`. *Logger* menolak meng-*append* ke CSV yang kolomnya berbeda (berkas dari versi lama), agar kolom tidak bergeser.
 
 Celah data selama koneksi terputus tidak dapat dipulihkan, karena ESP32 tidak menyimpan riwayat. Celah tersebut terlihat sebagai lompatan pada `wall_time`.
 
@@ -211,7 +212,7 @@ Celah data selama koneksi terputus tidak dapat dipulihkan, karena ESP32 tidak me
 
 1. Suhu tangki, suhu kolektor, dan *setpoint*.
 2. Intensitas cahaya.
-3. *Duty* heater dan *duty* pompa.
+3. PWM heater dan PWM pompa (nilai asli 0–255), dengan garis PWM minimum pompa (127).
 
 Grafik berjalan sebagai proses terpisah yang hanya membaca berkas. Dengan begitu, menutup jendela grafik (atau galat pada grafik) tidak memengaruhi perekaman. Hanya baris CSV yang sudah lengkap yang dibaca. Pembacaan sensor error (`-127`, lux negatif) tidak digambar, dan periode koneksi terputus (jeda > 2,5× interval sampel, minimal 10 s) ditampilkan sebagai garis yang terputus.
 

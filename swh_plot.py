@@ -31,6 +31,7 @@ except ImportError:
 
 SENSOR_ERROR = -127
 GAP_SECONDS = 10  # ambang putus minimum; aslinya max(ini, 2.5x interval sampel)
+PUMP_PWM_MIN = 127  # duty minimum pompa 50% = int(50 * 255 / 100), sama dengan firmware
 
 
 def newest_log():
@@ -108,11 +109,17 @@ class CsvTail:
         d["kolektor"].append(to_float(row.get("kolektor"), SENSOR_ERROR + 1))
         d["sp"].append(to_float(row.get("sp")))
         d["lux"].append(to_float(row.get("lux"), 0))
-        d["duty"].append(to_float(row.get("heaterDuty")))
-        if row.get("pumpDuty"):
-            d["pump"].append(to_float(row["pumpDuty"]))
-        else:  # CSV firmware lama: pump cuma 1/0 -> 100/0 biar sejajar skala %
-            d["pump"].append(to_float(row.get("pump")) * 100)
+        # Nilai PWM asli 0-255. CSV versi lama (persen atau pump 1/0) dikonversi.
+        if row.get("heaterPwm"):
+            d["duty"].append(to_float(row["heaterPwm"]))
+        else:
+            d["duty"].append(math.floor(to_float(row.get("heaterDuty")) * 255 / 100))
+        if row.get("pumpPwm"):
+            d["pump"].append(to_float(row["pumpPwm"]))
+        elif row.get("pumpDuty"):
+            d["pump"].append(math.floor(to_float(row["pumpDuty"]) * 255 / 100))
+        else:
+            d["pump"].append(to_float(row.get("pump")) * 255)
 
 
 def main():
@@ -155,9 +162,11 @@ def main():
 
     (l_duty,) = ax_out.plot([], [], color="tab:purple", lw=1.2, label="Heater PWM (PID malam)")
     (l_pump,) = ax_out.plot([], [], color="tab:green", lw=1.2, label="Pompa PWM (PID siang)")
-    ax_out.axhline(50, color="tab:green", lw=0.8, ls=":", alpha=0.6, label="PWM minimum pompa (50%)")
-    ax_out.set_ylabel("PWM duty (%)")
-    ax_out.set_ylim(-5, 105)
+    ax_out.axhline(PUMP_PWM_MIN, color="tab:green", lw=0.8, ls=":", alpha=0.6,
+                   label=f"PWM minimum pompa ({PUMP_PWM_MIN})")
+    ax_out.set_ylabel("PWM (0-255)")
+    ax_out.set_ylim(-10, 265)
+    ax_out.set_yticks([0, 64, 127, 191, 255])
     ax_out.legend(loc="upper left", fontsize=9)
     ax_out.grid(alpha=0.3)
     ax_out.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))

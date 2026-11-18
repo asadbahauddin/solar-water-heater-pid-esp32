@@ -32,13 +32,29 @@ DEFAULT_URL = "ws://192.168.4.1/ws"
 SENSOR_ERROR = -127
 
 # Urutan kolom CSV: timestamp wall-clock laptop dulu, lalu field dari ESP32.
-# Pompa dicatat sebagai pumpDuty (0-100 %), bukan pump 1/0.
+# Pompa & heater dicatat sebagai nilai PWM asli yang ditulis ke pin (0-255, 8-bit).
 ESP_FIELDS = [
-    "t", "tangki", "kolektor", "lux", "night", "pumpDuty", "heaterDuty",
+    "t", "tangki", "kolektor", "lux", "night", "pumpPwm", "heaterPwm",
     "mode", "dnOverride", "emergency", "sp", "kp", "ki", "kd",
     "dtOk", "pkp", "pki", "pkd", "dtOn", "dtOff", "pmin", "luxM", "luxS",
 ]
 CSV_FIELDS = ["wall_time"] + ESP_FIELDS
+
+
+def with_pwm(data):
+    """Pastikan ada heaterPwm/pumpPwm (0-255). Firmware lama cuma kirim persen
+    atau pump true/false -> dikonversi dengan rumus yang sama dengan firmware."""
+    def to_raw(pct):
+        return int(float(pct) * 255.0 / 100.0)
+    extra = {}
+    if "heaterPwm" not in data and isinstance(data.get("heaterDuty"), (int, float)):
+        extra["heaterPwm"] = to_raw(data["heaterDuty"])
+    if "pumpPwm" not in data:
+        if isinstance(data.get("pumpDuty"), (int, float)):
+            extra["pumpPwm"] = to_raw(data["pumpDuty"])
+        elif "pump" in data:
+            extra["pumpPwm"] = 255 if data["pump"] else 0
+    return dict(data, **extra) if extra else data
 
 
 def log(msg):
@@ -71,9 +87,7 @@ class CsvSink:
         os.fsync(self.f.fileno())
 
     def write(self, wall_time, data):
-        if "pumpDuty" not in data and "pump" in data:
-            # Firmware lama cuma kirim pump true/false -> 100/0 supaya kolom tetap terisi.
-            data = dict(data, pumpDuty=100 if data["pump"] else 0)
+        data = with_pwm(data)
         row = [wall_time]
         for key in ESP_FIELDS:
             v = data.get(key, "")
@@ -102,20 +116,20 @@ def fmt_temp(v):
 
 
 def status_line(wall, d, n):
-    def pct(v):
-        return f"{float(v):3.0f}%" if isinstance(v, (int, float)) else "n/a"
+    def pwm(v):
+        return f"{int(v):3d}" if isinstance(v, (int, float)) else "n/a"
 
     flags = ["MALAM" if d.get("night") else "SIANG"]
     if d.get("emergency"):
         flags.append("!!EMERGENCY!!")
-    pump = d.get("pumpDuty", 100 if d.get("pump") else 0)  # firmware lama cuma kirim bool
+    d = with_pwm(d)
     return (
         f"{wall.strftime('%H:%M:%S')} #{n:<6} "
         f"Tangki {fmt_temp(d.get('tangki'))} | "
         f"Kolektor {fmt_temp(d.get('kolektor'))} | "
         f"SP {d.get('sp', '?')} | "
-        f"{str(d.get('mode', '?')):<9} | Heater {pct(d.get('heaterDuty'))} "
-        f"Pompa {pct(pump)} | {' '.join(flags)}"
+        f"{str(d.get('mode', '?')):<9} | PWM heater {pwm(d.get('heaterPwm'))} "
+        f"pompa {pwm(d.get('pumpPwm'))} | {' '.join(flags)}"
     )
 
 

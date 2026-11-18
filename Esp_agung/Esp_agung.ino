@@ -191,6 +191,8 @@ bool manualHeaterOn = false;       // buat bring-up test MOSFET di MODE_MANUAL
 bool heaterEmergencyOff = false;   // true kalau safety cutoff pernah kena, perlu clear manual
 float heaterDutyPercent = 0.0;     // 0-100, buat display & step test fixed-duty
 float pumpDutyPercent = 0.0;       // 0-100, keluaran aktual ke pompa
+int heaterPwm = 0;                 // nilai PWM asli yang ditulis ke pin (0-255, 8-bit)
+int pumpPwm = 0;                   // nilai PWM asli yang ditulis ke pin (0-255, 8-bit)
 bool dtOk = false;                 // gerbang dT kolektor-tangki (dengan histeresis)
 
 float luxMalam = LUX_MALAM_DEFAULT;
@@ -300,7 +302,7 @@ const char INDEX_HTML[] PROGMEM = R"HTMLPAGE(
   <div class="statline">Suhu Tangki (PV): <span class="big" id="st">--</span> C</div>
   <div class="statline">Suhu Kolektor: <span id="sk">--</span> C</div>
   <div class="statline">Cahaya: <span id="lux">--</span> lux (<span id="dn">--</span>)</div>
-  <div class="statline">Pompa: <span id="pumpstat">--</span>% (dT <span id="dtstat">--</span>) | Heater duty: <span id="heaterstat">--</span>% | Mode: <span id="modestat">--</span></div>
+  <div class="statline">Pompa PWM: <span id="pumpstat">--</span>/255 (dT <span id="dtstat">--</span>) | Heater PWM: <span id="heaterstat">--</span>/255 | Mode: <span id="modestat">--</span></div>
   <div class="statline" id="emergline" style="display:none;" class="bad">** SAFETY CUTOFF AKTIF - HEATER DIPAKSA OFF **</div>
 </div>
 
@@ -377,9 +379,9 @@ ws.onmessage = function(ev) {
   document.getElementById('sk').textContent = d.kolektor.toFixed(2);
   document.getElementById('lux').textContent = d.lux.toFixed(1);
   document.getElementById('dn').textContent = d.night ? 'MALAM' : 'SIANG';
-  document.getElementById('pumpstat').textContent = d.pumpDuty.toFixed(0);
+  document.getElementById('pumpstat').textContent = d.pumpPwm;
   document.getElementById('dtstat').textContent = d.dtOk ? 'OK' : 'kurang';
-  document.getElementById('heaterstat').textContent = d.heaterDuty.toFixed(0);
+  document.getElementById('heaterstat').textContent = d.heaterPwm;
   document.getElementById('modestat').textContent = d.mode;
   document.getElementById('emergline').style.display = d.emergency ? 'block' : 'none';
 
@@ -554,7 +556,7 @@ void setup() {
   lastCycleTime = millis();
   Serial.println(F("Setup selesai. Mode awal: MANUAL (lihat catatan keamanan #3)."));
   Serial.println(F("CSV backup header:"));
-  Serial.println(F("ms,suhu_tangki,suhu_kolektor,lux,night,mode,heaterDuty,pumpDuty"));
+  Serial.println(F("ms,suhu_tangki,suhu_kolektor,lux,night,mode,heaterPwm,pumpPwm"));
 }
 
 // ================================================================================
@@ -707,12 +709,14 @@ void updateDayNight() {
 
 void setHeater(float duty) {
   heaterDutyPercent = duty;
-  ledcWrite(HEATER_PWM_CHANNEL, (int)(duty * 255.0 / 100.0));
+  heaterPwm = (int)(duty * 255.0 / 100.0);
+  ledcWrite(HEATER_PWM_CHANNEL, heaterPwm);
 }
 
 void setPump(float duty) {
   pumpDutyPercent = duty;
-  ledcWrite(PUMP_PWM_CHANNEL, (int)(duty * 255.0 / 100.0));
+  pumpPwm = (int)(duty * 255.0 / 100.0);
+  ledcWrite(PUMP_PWM_CHANNEL, pumpPwm);
 }
 
 void runControlLogic() {
@@ -829,6 +833,8 @@ void sendTelemetry() {
   json += "\"ki\":" + String(pidHeater.ki, 3) + ",";
   json += "\"kd\":" + String(pidHeater.kd, 3) + ",";
   json += "\"pumpDuty\":" + String(pumpDutyPercent, 1) + ",";
+  json += "\"heaterPwm\":" + String(heaterPwm) + ",";
+  json += "\"pumpPwm\":" + String(pumpPwm) + ",";
   json += "\"dtOk\":" + String(dtOk ? "true" : "false") + ",";
   json += "\"pkp\":" + String(pidPump.kp, 3) + ",";
   json += "\"pki\":" + String(pidPump.ki, 3) + ",";
@@ -852,14 +858,11 @@ void updateLCD() {
   lcd.print(F("Tgk:"));
   lcd.print(isnan(suhuTangki) ? "ERR  " : String(suhuTangki,1));
 
+  // Lebar tetap 20 kolom: kelebihan karakter di LCD 20x4 nyambung ke baris 3.
+  char line1[21];
+  snprintf(line1, sizeof(line1), "SP:%4.1f H:%3d P:%3d ", pidSetpoint, heaterPwm, pumpPwm);
   lcd.setCursor(0,1);
-  lcd.print(F("SP:"));
-  lcd.print(pidSetpoint,1);
-  lcd.print(F(" H:"));
-  lcd.print((int)heaterDutyPercent);
-  lcd.print(F(" P:"));
-  lcd.print((int)pumpDutyPercent);
-  lcd.print(F("   "));
+  lcd.print(line1);
 
   lcd.setCursor(0,2);
   lcd.print(F("Mode:"));
@@ -879,6 +882,6 @@ void logSerialCSV(unsigned long t) {
   Serial.print(lux,1); Serial.print(",");
   Serial.print(isNightEffective?1:0); Serial.print(",");
   Serial.print(currentMode); Serial.print(",");
-  Serial.print(heaterDutyPercent,1); Serial.print(",");
-  Serial.println(pumpDutyPercent,1);
+  Serial.print(heaterPwm); Serial.print(",");
+  Serial.println(pumpPwm);
 }
