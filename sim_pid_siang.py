@@ -239,7 +239,7 @@ def export_extra(args):
     c.set_xlabel("Waktu")
     for ax in (a, b, c):
         ax.grid(alpha=0.3)
-    fig.suptitle(f"Simulasi PID Siang (Pompa) - SP {args.sp:g} °C, "
+    fig.suptitle(f"PID Siang (Pompa) - SP {args.sp:g} °C, "
                  f"Kp={args.kp:g} Ki={args.ki:g} Kd={args.kd:g}", fontsize=12)
     fig.tight_layout()
     fig.savefig(base + ".png", dpi=130)
@@ -261,6 +261,8 @@ def main():
     p.add_argument("--start", default="09:15")
     p.add_argument("--end", default="13:30")
     p.add_argument("--t-sp", type=float, default=95, help="menit sampai setpoint pertama")
+    p.add_argument("--k", type=float, default=0,
+                   help="koefisien plant per menit (0 = kalibrasi otomatis dari --t-sp)")
     p.add_argument("--seed", type=int, default=7)
     args = p.parse_args()
 
@@ -273,7 +275,9 @@ def main():
 
     # kalibrasi k (bisection) supaya setpoint pertama tercapai di --t-sp menit
     lo, hi = 1e-5, 1e-3
-    for _ in range(60):
+    if args.k:  # pakai plant tetap (mis. hasil kalibrasi SP 43) tanpa kalibrasi ulang
+        lo = hi = args.k / 60
+    for _ in range(0 if args.k else 60):
         k = (lo * hi) ** 0.5
         _, first = simulate(args, k, inputs, random.Random(args.seed + 1))
         if first is None or first > args.t_sp:
