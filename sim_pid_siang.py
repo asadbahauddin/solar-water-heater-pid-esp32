@@ -65,8 +65,8 @@ def make_inputs(n, rng, tc_lo, tc_hi, lux_lo, lux_hi):
         a += -a * CYCLE / 900 + rng.gauss(0, 0.035)
         b += -b * CYCLE / 300 + rng.gauss(0, 0.05)
         sun = math.sin(math.pi * (0.25 + 0.6 * frac))  # naik menuju siang, landai setelahnya
-        tcs.append(tc_mid + tc_amp * max(-1, min(1, 0.35 * (sun - 0.85) / 0.15 + a)))
-        luxs.append(lux_mid + lux_amp * max(-0.98, min(0.98, 0.6 * (sun - 0.85) / 0.15 + 0.35 * b)))
+        tcs.append(tc_mid + 0.92 * tc_amp * math.tanh(0.35 * (sun - 0.85) / 0.15 + a))
+        luxs.append(lux_mid + 0.97 * lux_amp * math.tanh(0.5 * (sun - 0.85) / 0.15 + 0.35 * b))
     return tcs, luxs
 
 
@@ -80,7 +80,9 @@ def simulate(args, k, inputs, rng=None):
         tamb = 29.0 + 4.0 * sec / (4.25 * 3600)
         f_prev = rows[-1][3] if rows else 0.0
         # kolektor sedikit lebih panas saat air diam (pompa mati), tetap di rentang
-        tc = min(args.tc_hi, max(args.tc_lo, tc_base + 0.6 * (1 - min(1, f_prev / 0.5)) - 0.3))
+        tc_mid = (args.tc_lo + args.tc_hi) / 2
+        tc_amp = (args.tc_hi - args.tc_lo) / 2
+        tc = tc_mid + tc_amp * math.tanh(math.atanh((tc_base - tc_mid) / tc_amp) + 0.5 * (1 - min(1, f_prev / 0.5)) - 0.25)
         tt_read = quant(tt, 0.0625)
         tc_read = quant(tc, 0.0625)
         d_t = tc_read - tt_read
